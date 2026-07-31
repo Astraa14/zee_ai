@@ -1,12 +1,67 @@
+import ipaddress
 import json
 import os
+import socket
 import threading
+from datetime import datetime, timedelta, timezone
 
 from flask import Flask, Response, render_template, request, jsonify
 
 import jarvis_core
 
 app = Flask(__name__)
+
+CERT_FILE = os.path.join(os.path.dirname(__file__), "cert.pem")
+KEY_FILE = os.path.join(os.path.dirname(__file__), "key.pem")
+
+
+def _lan_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except OSError:
+        return "127.0.0.1"
+
+
+def ensure_cert():
+    """Create a self-signed cert covering localhost and the LAN IP, if missing."""
+    if os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
+        return
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "jarvis.local")])
+    alt_names = [
+        x509.DNSName("localhost"),
+        x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+        x509.IPAddress(ipaddress.ip_address(_lan_ip())),
+    ]
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.now(timezone.utc) - timedelta(days=1))
+        .not_valid_after(datetime.now(timezone.utc) + timedelta(days=3650))
+        .add_extension(x509.SubjectAlternativeName(alt_names), critical=False)
+        .sign(key, hashes.SHA256())
+    )
+    with open(KEY_FILE, "wb") as f:
+        f.write(key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        ))
+    with open(CERT_FILE, "wb") as f:
+        f.write(cert.public_bytes(serialization.Encoding.PEM))
+    print(f"Generated self-signed certificate for localhost and {_lan_ip()}")
 
 
 def _stream_reply(text):
@@ -92,4 +147,10 @@ if __name__ == "__main__":
     # Preload the model in the background so the first question is fast.
     threading.Thread(target=jarvis_core.warmup_model, daemon=True).start()
     debug = os.getenv("FLASK_DEBUG", "1") == "1"
-    app.run(host="0.0.0.0", port=5000, debug=debug)
+
+    kwargs = {"host": "0.0.0.0", "port": 5000, "debug": debug}
+    if os.getenv("JARVIS_HTTPS", "0") == "1":
+        ensure_cert()
+        kwargs["ssl_context"] = (CERT_FILE, KEY_FILE)
+        print(f"Serving at https://{_lan_ip()}:5000 (allow the certificate once in your browser)")
+    app.run(**kwargs)

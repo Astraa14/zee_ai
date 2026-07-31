@@ -87,6 +87,26 @@ your speakers.
 
 > `FLASK_DEBUG=0 python app.py` disables the auto-reloader.
 
+#### Using the microphone from another device (or a LAN IP)
+
+Chrome only allows microphone access on secure origins (`https://` or
+`http://localhost`). When you open the UI via your LAN IP (e.g.
+`http://192.168.1.4:5000`) Chrome blocks the mic. Two ways to fix it:
+
+**A. HTTPS mode (recommended)** — run with a self-signed certificate:
+
+```sh
+set JARVIS_HTTPS=1
+python app.py
+```
+
+On first start this generates `cert.pem`/`key.pem` covering `localhost` and
+your LAN IP. Open `https://192.168.1.4:5000`, click **Advanced → Proceed to
+site** once, and the mic will work from then on.
+
+**B. Quick local option** — just use `http://localhost:5000` on the same
+machine (Chrome treats localhost as secure).
+
 ### Desktop voice loop
 
 ```sh
@@ -171,6 +191,7 @@ Set any of these environment variables before running:
 | `JARVIS_NUM_CTX`      | `4096`                   | Context window — lower = less VRAM, faster  |
 | `JARVIS_KEEP_ALIVE`   | `30m`                    | How long the model stays loaded in RAM      |
 | `JARVIS_AUDIO_BUFFER` | `16384`                  | Bytes of audio before playback starts       |
+| `JARVIS_HTTPS`        | `0`                      | Serve over HTTPS with a self-signed cert (`app.py`) |
 | `FLASK_DEBUG`         | `1`                      | Flask auto-reloader on/off (`app.py`)       |
 
 ## How fast replies work
@@ -206,8 +227,9 @@ zee/
   `OLLAMA_MODEL`.
 - **No sound** — the audio device may be busy; try closing apps using the
   speakers, or set `JARVIS_VOICE`/`JARVIS_RATE` to tweak TTS.
-- **Microphone not working in the browser** — use Chrome or Edge, and grant
-  microphone permission to `localhost`.
+- **Microphone not working in the browser** — Chrome blocks the mic on plain
+  HTTP. Use `http://localhost:5000`, or enable HTTPS with `JARVIS_HTTPS=1`
+  (see [Using the microphone](#using-the-microphone-from-another-device-or-a-lan-ip)).
 - **Tools don't run (JARVIS answers normally)** — your model doesn't support
   function calling. Pull a tool-capable one: `ollama pull llama3.1` and set
   `OLLAMA_MODEL=llama3.1`.
