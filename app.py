@@ -146,11 +146,17 @@ def _describe_result(result):
 if __name__ == "__main__":
     # Preload the model in the background so the first question is fast.
     threading.Thread(target=jarvis_core.warmup_model, daemon=True).start()
-    debug = os.getenv("FLASK_DEBUG", "1") == "1"
+    debug = os.getenv("FLASK_DEBUG", "0") == "1"
 
     kwargs = {"host": "0.0.0.0", "port": 5000, "debug": debug}
-    if os.getenv("JARVIS_HTTPS", "0") == "1":
-        ensure_cert()
-        kwargs["ssl_context"] = (CERT_FILE, KEY_FILE)
-        print(f"Serving at https://{_lan_ip()}:5000 (allow the certificate once in your browser)")
+    # HTTPS is on by default so the microphone works over the LAN.
+    # Set JARVIS_HTTPS=0 to serve plain HTTP instead.
+    if os.getenv("JARVIS_HTTPS", "1") == "1":
+        try:
+            ensure_cert()
+            kwargs["ssl_context"] = (CERT_FILE, KEY_FILE)
+            print(f"Serving at https://{_lan_ip()}:5000 "
+                  f"(allow the certificate once in your browser)")
+        except Exception as e:
+            print(f"HTTPS unavailable ({e}); falling back to plain HTTP.")
     app.run(**kwargs)

@@ -12,8 +12,6 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr :5000 ^| findstr LISTENING') 
     taskkill /F /PID %%a >nul 2>&1
 )
 
-REM --- Start JARVIS over HTTPS (mic works from any device) ---
-set JARVIS_HTTPS=1
-set FLASK_DEBUG=0
+REM --- Start JARVIS (HTTPS is on by default) ---
 python app.py
 pause

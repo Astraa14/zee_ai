@@ -81,34 +81,23 @@ The Web UI does **not** need the Vosk model.
 python app.py
 ```
 
-Then open `http://localhost:5000` in Chrome or Edge. Click **Activate
-Microphone** to talk, or type a command and press Enter. Audio plays through
-your speakers.
+JARVIS serves **HTTPS by default** (self-signed cert, generated automatically)
+so the microphone works from any device. Open **`https://192.168.1.4:5000`**
+(use your own IP), click **Advanced → Proceed to site** once, then click
+**Activate Microphone** to talk, or type a command and press Enter.
 
-> `FLASK_DEBUG=0 python app.py` disables the auto-reloader.
+> Plain HTTP (e.g. for localhost only): `set JARVIS_HTTPS=0` then
+> `python app.py`, open `http://localhost:5000`.
+>
+> `set FLASK_DEBUG=1` re-enables the auto-reloader for development.
 
 #### Using the microphone from another device (or a LAN IP)
 
 Chrome only allows microphone access on secure origins (`https://` or
-`http://localhost`). When you open the UI via your LAN IP (e.g.
-`http://192.168.1.4:5000`) Chrome blocks the mic. Two ways to fix it:
-
-**A. HTTPS mode (recommended)** — run the launcher:
-
-```bat
-start_jarvis.bat
-```
-
-It stops any stale server on port 5000, then starts JARVIS over HTTPS with a
-self-signed certificate covering `localhost` and your LAN IP. Open
-`https://192.168.1.4:5000`, click **Advanced → Proceed to site** once, and the
-mic will work from then on. If the page just hangs, an old server instance was
-still running — the launcher handles that automatically.
-
-> Manual equivalent: `set JARVIS_HTTPS=1` then `python app.py`.
-
-**B. Quick local option** — just use `http://localhost:5000` on the same
-machine (Chrome treats localhost as secure).
+`http://localhost`). HTTPS is already the default, so just use
+`https://YOUR_IP:5000`. If the page hangs instead of showing a certificate
+warning, an old server instance is still running — stop it (or use
+`start_jarvis.bat`, which handles that automatically).
 
 ### Desktop voice loop
 
@@ -194,8 +183,8 @@ Set any of these environment variables before running:
 | `JARVIS_NUM_CTX`      | `4096`                   | Context window — lower = less VRAM, faster  |
 | `JARVIS_KEEP_ALIVE`   | `30m`                    | How long the model stays loaded in RAM      |
 | `JARVIS_AUDIO_BUFFER` | `16384`                  | Bytes of audio before playback starts       |
-| `JARVIS_HTTPS`        | `0`                      | Serve over HTTPS with a self-signed cert (`app.py`) |
-| `FLASK_DEBUG`         | `1`                      | Flask auto-reloader on/off (`app.py`)       |
+| `JARVIS_HTTPS`        | `1`                      | Serve over HTTPS with a self-signed cert (`app.py`) |
+| `FLASK_DEBUG`         | `0`                      | Flask auto-reloader on/off (`app.py`)       |
 
 ## How fast replies work
 
