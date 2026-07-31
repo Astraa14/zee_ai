@@ -1,0 +1,6 @@
+flask>=3.0
+ollama>=0.3
+edge-tts>=6.1
+pygame>=2.5
+vosk>=0.3.45
+sounddevice>=0.4.6
