@@ -93,16 +93,19 @@ Chrome only allows microphone access on secure origins (`https://` or
 `http://localhost`). When you open the UI via your LAN IP (e.g.
 `http://192.168.1.4:5000`) Chrome blocks the mic. Two ways to fix it:
 
-**A. HTTPS mode (recommended)** — run with a self-signed certificate:
+**A. HTTPS mode (recommended)** — run the launcher:
 
-```sh
-set JARVIS_HTTPS=1
-python app.py
+```bat
+start_jarvis.bat
 ```
 
-On first start this generates `cert.pem`/`key.pem` covering `localhost` and
-your LAN IP. Open `https://192.168.1.4:5000`, click **Advanced → Proceed to
-site** once, and the mic will work from then on.
+It stops any stale server on port 5000, then starts JARVIS over HTTPS with a
+self-signed certificate covering `localhost` and your LAN IP. Open
+`https://192.168.1.4:5000`, click **Advanced → Proceed to site** once, and the
+mic will work from then on. If the page just hangs, an old server instance was
+still running — the launcher handles that automatically.
+
+> Manual equivalent: `set JARVIS_HTTPS=1` then `python app.py`.
 
 **B. Quick local option** — just use `http://localhost:5000` on the same
 machine (Chrome treats localhost as secure).
