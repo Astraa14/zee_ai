@@ -14,6 +14,7 @@ A lightweight JARVIS-style assistant that runs **fully offline for speech** and 
 - 🎙️ Browser voice input (Chrome/Edge Web Speech API) *or* offline desktop
   microphone (Vosk + sounddevice)
 - 🧠 Local AI brain via **Ollama** (no cloud API needed)
+- 🛠️ **Function calling** — JARVIS can take real actions (see [Tools](#tools))
 - 🗣️ Lifelike TTS with **edge-tts** (default: `en-US-ChristopherNeural`)
 - 💬 Text fallback so it works even without a microphone
 - ⌨️ Voice commands: open Notepad, Calculator, browser
@@ -22,11 +23,13 @@ A lightweight JARVIS-style assistant that runs **fully offline for speech** and 
 ## Requirements
 
 - **Python 3.9+**
-- **Ollama** installed and running locally, with a model pulled (e.g. `llama3`):
+- **Ollama** installed and running locally, with a **tool-capable** model.
+  The default is `llama3.1:8b` (supports function calling). `llama3`, `llama3.2`,
+  `qwen3` and `gemma3` also work — `llama3` will simply skip tools:
 
   ```sh
   ollama serve
-  ollama pull llama3
+  ollama pull llama3.1:8b     # default, recommended for full tool support
   ```
 
 - For the desktop voice loop only: a working microphone and a **Vosk model**
@@ -90,13 +93,32 @@ Say **"JARVIS"** to get its attention, then:
 - `jarvis what time is it` — any conversation goes to the Ollama brain
 - `jarvis stop` / `exit` / `shutdown` — quit
 
+## Tools
+
+JARVIS can call tools through the LLM's function-calling support. It will use
+them automatically when they help, then summarise the result. Requires a
+tool-capable model (see [Requirements](#requirements)).
+
+| Tool           | What it does                                        |
+| -------------- | --------------------------------------------------- |
+| `get_time`     | Current date and time                               |
+| `open_app`     | Launch desktop apps (notepad, calculator, browser…) |
+| `system_info`  | CPU, RAM and battery usage                          |
+| `web_search`   | Web search (Wikipedia API, no key needed)           |
+| `get_weather`  | Current weather for any city (Open-Meteo, no key)   |
+| `create_note`  | Append a note to `notes.txt`                        |
+
+If your model doesn't support tools, JARVIS automatically falls back to plain
+chat — the tools are simply skipped. `web_search` and `get_weather` need an
+internet connection.
+
 ## Configuration
 
 Set any of these environment variables before running:
 
 | Variable        | Default                    | Description                         |
 | --------------- | -------------------------- | ----------------------------------- |
-| `OLLAMA_MODEL`  | `llama3`                   | Ollama model used for answers       |
+| `OLLAMA_MODEL`  | `llama3.1:8b`               | Ollama model used for answers/tools |
 | `JARVIS_VOICE`  | `en-US-ChristopherNeural`  | edge-tts voice (see `edge-tts --list`) |
 | `JARVIS_RATE`   | `+10%`                     | Speech speed adjustment             |
 | `FLASK_DEBUG`   | `1`                        | Flask auto-reloader on/off (`app.py`) |
@@ -122,6 +144,9 @@ zee/
   speakers, or set `JARVIS_VOICE`/`JARVIS_RATE` to tweak TTS.
 - **Microphone not working in the browser** — use Chrome or Edge, and grant
   microphone permission to `localhost`.
+- **Tools don't run (JARVIS answers normally)** — your model doesn't support
+  function calling. Pull a tool-capable one: `ollama pull llama3.1` and set
+  `OLLAMA_MODEL=llama3.1`.
 - **`vosk.Model` not found** — download a model and place it in the `model/`
   folder as described above.
 
