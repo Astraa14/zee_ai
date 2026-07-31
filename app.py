@@ -144,6 +144,8 @@ def _describe_result(result):
 
 
 if __name__ == "__main__":
+    # Audio must be initialized in the main thread before any speech threads.
+    jarvis_core.init_audio()
     # Preload the model in the background so the first question is fast.
     threading.Thread(target=jarvis_core.warmup_model, daemon=True).start()
     debug = os.getenv("FLASK_DEBUG", "0") == "1"

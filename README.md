@@ -182,7 +182,6 @@ Set any of these environment variables before running:
 | `JARVIS_TEMPERATURE`  | `0.7`                    | Model creativity                            |
 | `JARVIS_NUM_CTX`      | `4096`                   | Context window — lower = less VRAM, faster  |
 | `JARVIS_KEEP_ALIVE`   | `30m`                    | How long the model stays loaded in RAM      |
-| `JARVIS_AUDIO_BUFFER` | `16384`                  | Bytes of audio before playback starts       |
 | `JARVIS_HTTPS`        | `1`                      | Serve over HTTPS with a self-signed cert (`app.py`) |
 | `FLASK_DEBUG`         | `0`                      | Flask auto-reloader on/off (`app.py`)       |
 
@@ -192,9 +191,8 @@ Set any of these environment variables before running:
    (`JARVIS_KEEP_ALIVE`), so the first question isn't a cold start.
 2. While the model thinks, the web UI shows a status line; answers then
    **stream token-by-token** into the log instead of appearing all at once.
-3. Audio starts playing after ~16 KB of speech has been synthesized
-   (`JARVIS_AUDIO_BUFFER`), so JARVIS talks while the rest of the audio is
-   still downloading.
+3. Once the reply is complete, the audio file is generated and played —
+   so JARVIS talks right after the text appears.
 4. Replies are capped at `JARVIS_MAX_TOKENS` so JARVIS gets to the point.
 
 If your model doesn't support tools, JARVIS automatically falls back to plain

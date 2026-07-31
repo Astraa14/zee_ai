@@ -22,7 +22,6 @@ JARVIS_MAX_TOKENS = int(os.getenv("JARVIS_MAX_TOKENS", "150"))
 JARVIS_TEMPERATURE = float(os.getenv("JARVIS_TEMPERATURE", "0.7"))
 JARVIS_KEEP_ALIVE = os.getenv("JARVIS_KEEP_ALIVE", "30m")
 JARVIS_NUM_CTX = int(os.getenv("JARVIS_NUM_CTX", "4096"))
-JARVIS_AUDIO_BUFFER = int(os.getenv("JARVIS_AUDIO_BUFFER", "16384"))
 
 SYSTEM_PROMPT = (
     "You are JARVIS, a helpful AI assistant. Keep your answers brief, "
@@ -36,14 +35,32 @@ SYSTEM_PROMPT = (
 )
 
 _play_lock = threading.Lock()
+_mixer_lock = threading.Lock()
 
 
 # ==========================================
 # MOUTH (Text-to-Speech, streamed playback)
 # ==========================================
 def _ensure_mixer():
-    if not pygame.mixer.get_init():
-        pygame.mixer.init()
+    with _mixer_lock:
+        if not pygame.mixer.get_init():
+            pygame.mixer.init()
+
+
+def init_audio():
+    """Initialize the audio mixer once, from the main thread, at startup.
+
+    pygame's mixer can misbehave (no sound) if initialized inside a
+    background thread, so always call this before spawning speech threads.
+    """
+    try:
+        _ensure_mixer()
+        pygame.mixer.music.set_volume(1.0)
+        print("Audio ready.")
+        return True
+    except Exception as e:
+        print(f"Audio init failed: {e}")
+        return False
 
 
 def _play_audio_file(path):
@@ -59,24 +76,20 @@ def _play_audio_file(path):
 def speak(text, wait=False):
     """Generate TTS audio and play it through the speakers.
 
-    Audio starts as soon as enough of the stream has arrived, so the reply
-    is heard well before the full file is downloaded. By default this runs
-    in a background thread; pass wait=True to block until playback finishes.
+    The MP3 is downloaded completely before playback starts (SDL_mixer
+    hangs silently on partially-written MP3s), then played through the
+    speakers. By default this runs in a background thread; pass wait=True
+    to block until playback finishes.
     """
     print(f"JARVIS: {text}")
 
     async def generate(path, ready):
         communicate = edge_tts.Communicate(text, JARVIS_VOICE, rate=JARVIS_RATE)
-        written = 0
         with open(path, "wb") as f:
             stream = communicate.stream()
             async for chunk in stream:
                 if chunk["type"] == "audio":
                     f.write(chunk["data"])
-                    written += len(chunk["data"])
-                    if not ready.is_set() and written >= JARVIS_AUDIO_BUFFER:
-                        f.flush()
-                        ready.set()
             f.flush()
         ready.set()
 
@@ -90,7 +103,11 @@ def speak(text, wait=False):
         writer.start()
         try:
             ready.wait(timeout=15)
-            _play_audio_file(path)
+            try:
+                _play_audio_file(path)
+            except Exception:
+                writer.join(timeout=60)
+                _play_audio_file(path)
             writer.join(timeout=60)
         except Exception as e:
             print(f"Audio error: {e}")

@@ -81,6 +81,8 @@ def main():
     samplerate = 16000
     pending_approval = None
 
+    # Audio must be initialized in the main thread before any speech threads.
+    jarvis_core.init_audio()
     # Preload the model so the first question isn't slow.
     import threading
     threading.Thread(target=jarvis_core.warmup_model, daemon=True).start()
