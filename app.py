@@ -66,6 +66,7 @@ def ensure_cert():
 
 def _stream_reply(text):
     """Generator: yields NDJSON lines (delta / approval / done) as the model replies."""
+    print(f"[ask] text={text!r}", flush=True)
     try:
         stream = jarvis_core.StreamAsk(text)
         for delta in stream:

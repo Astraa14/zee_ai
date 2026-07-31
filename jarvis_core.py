@@ -29,6 +29,8 @@ SYSTEM_PROMPT = (
     "or symbols like asterisks, as they will be read out loud by a text-to-speech engine. "
     "Only call a tool when the user's request clearly needs it (e.g. the time, "
     "weather, a web search, system info, or a computer action). Otherwise answer directly. "
+    "Never invent tool names that do not exist; only use the tools listed. "
+    "If you do not know the answer, say so instead of guessing. "
     "After a tool runs, give a short summary of the result. "
     "IMPORTANT: if a tool result contains 'needs_approval', the action was NOT "
     "performed — ask the user for permission and never claim it happened."
@@ -136,12 +138,41 @@ def _fetch_json(url, timeout=10):
 def _filter_args(func, args):
     """Drop arguments the tool function doesn't accept (models can pass junk)."""
     sig = inspect.signature(func)
-    return {k: v for k, v in (args or {}).items() if k in sig.parameters}
+    cleaned = {}
+    for k, v in (args or {}).items():
+        if k not in sig.parameters:
+            continue
+        if isinstance(v, dict) and set(v.keys()) <= {"type", "value"}:
+            v = v.get("value", v.get("type"))
+        cleaned[k] = v
+    return cleaned
 
 
 def tool_get_time():
     from datetime import datetime
     return {"datetime": datetime.now().strftime("%A, %Y-%m-%d %H:%M:%S")}
+
+
+def tool_get_location():
+    """Best-effort IP geolocation: approximate city/country of this computer."""
+    for url in ("http://ip-api.com/json/", "https://ipapi.co/json/"):
+        try:
+            data = _fetch_json(url, timeout=8)
+            if not isinstance(data, dict) or data.get("error") or data.get("status") == "fail":
+                continue
+            city = data.get("city") or data.get("regionName") or "unknown"
+            country = data.get("country_name") or data.get("country") or ""
+            result = {"city": city, "country": country}
+            if data.get("lat") is not None:
+                result["latitude"] = data["lat"]
+                result["longitude"] = data["lon"]
+            elif data.get("latitude") is not None:
+                result["latitude"] = data["latitude"]
+                result["longitude"] = data["longitude"]
+            return result
+        except Exception:
+            continue
+    return {"error": "Location lookup failed."}
 
 
 _KNOWN_APPS = {
@@ -491,6 +522,14 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_location",
+            "description": "Get the approximate city and country location of this computer (IP geolocation).",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "open_app",
             "description": "Open a desktop application (e.g. notepad, calculator, browser, paint, terminal).",
             "parameters": {
@@ -652,6 +691,7 @@ TOOLS = [
 
 _TOOL_FUNCS = {
     "get_time": tool_get_time,
+    "get_location": tool_get_location,
     "open_app": tool_open_app,
     "system_info": tool_system_info,
     "web_search": tool_web_search,
@@ -815,6 +855,65 @@ def _parse_inline_tool_call(content):
     return m.group(1), args
 
 
+_GREETING_RE = re.compile(
+    r"^(hi|hiya|hello|hey|yo|sup|wassup|what'?s up|good\s+(morning|afternoon|evening|night))[!.?\s]*(jarvis)?[!.?\s]*$",
+    re.IGNORECASE,
+)
+
+
+def _quick_reply(text):
+    """Canned reply for greeting-only messages, so the model doesn't call an
+    unrelated tool (like get_time) in response to 'hey'."""
+    m = _GREETING_RE.match((text or "").strip())
+    if m:
+        return f"{m.group(1).capitalize()}! How can I help you?"
+    return None
+
+
+# Tools the model must NOT run unless the user's message mentions a related
+# keyword. Stops the model from acting on its own (e.g. changing the volume
+# while answering an unrelated question).
+_GUARDS = {
+    "get_time": ["time", "date", "day", "clock", "today", "calendar"],
+    "get_weather": ["weather", "temperature", "forecast", "rain", "snow", "hot", "cold", "degrees", "warm"],
+    "set_volume": ["volume", "louder", "quieter", "mute", "unmute", "sound", "turn it up", "turn it down", "turn up", "turn down", "lower", "raise"],
+    "adjust_volume": ["volume", "louder", "quieter", "mute", "unmute", "sound", "turn it up", "turn it down", "turn up", "turn down", "lower", "raise"],
+    "media_control": ["play", "pause", "stop", "music", "song", "video", "media", "resume", "skip", "next", "previous"],
+    "set_brightness": ["brightness", "brighter", "dimmer", "dim", "screen", "display", "turn it up", "turn it down"],
+    "type_text": ["type", "write", "keyboard"],
+    "kill_process": ["kill", "close", "end task", "exit", "terminate", "quit"],
+    "system_action": ["shutdown", "shut down", "restart", "reboot", "sleep", "hibernate", "lock", "logoff", "sign out", "turn off", "power off"],
+}
+
+
+def _guard_blocked(name, user_text):
+    """Return True if the model must not run this tool for this message."""
+    keywords = _GUARDS.get(name)
+    if not keywords:
+        return False
+    low = (user_text or "").lower()
+    return not any(k in low for k in keywords)
+
+
+def _guarded_run(name, args, user_text):
+    """Run a tool, refusing when the user never asked for it."""
+    if _guard_blocked(name, user_text):
+        return {"error": f"Do not use the '{name}' tool: the user did not ask for it. "
+                         "Answer their question directly instead."}
+    return run_tool(name, args)
+
+
+def _unknown_tool_name(content):
+    """If the model emitted JSON for a tool that doesn't exist, return its name."""
+    text = (content or "").strip()
+    if not text.startswith("{"):
+        return None
+    m = re.search(r'"name"\s*:\s*"([^"]+)"', text)
+    if m and m.group(1) not in _TOOL_FUNCS:
+        return m.group(1)
+    return None
+
+
 def ask_ollama(text):
     """Query the local Ollama LLM, letting it call tools as needed. Raises on failure.
 
@@ -823,6 +922,9 @@ def ask_ollama(text):
     to approve (approve_action) or cancel (deny_action) it.
     """
     print(f"Querying Ollama model '{OLLAMA_MODEL}'...")
+    quick = _quick_reply(text)
+    if quick:
+        return AskResult(quick)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": text},
@@ -851,11 +953,23 @@ def ask_ollama(text):
                     if tool_rounds > 5:
                         raise RuntimeError("The model called tools too many times; giving up.")
                     messages.append({"role": "assistant", "content": response.message.content})
-                    result = run_tool(name, args)
+                    result = _guarded_run(name, args, text)
                     if result.get("needs_approval"):
                         approval = result
                     messages.append({"role": "tool", "content": json.dumps(result)})
                     continue
+            unknown = _unknown_tool_name(response.message.content)
+            if unknown:
+                tool_rounds += 1
+                if tool_rounds > 5:
+                    raise RuntimeError("The model called tools too many times; giving up.")
+                messages.append({"role": "assistant", "content": response.message.content})
+                messages.append({
+                    "role": "tool",
+                    "content": json.dumps({"error": f"Unknown tool '{unknown}'. Only use the "
+                                               "tools listed; otherwise answer directly."}),
+                })
+                continue
             if approval is None:
                 approval = maybe_request_approval(text)
             return AskResult(response.message.content, approval=approval)
@@ -868,7 +982,7 @@ def ask_ollama(text):
         for call in response.message.tool_calls:
             name = call.function.name
             args = call.function.arguments or {}
-            result = run_tool(name, args)
+            result = _guarded_run(name, args, text)
             if result.get("needs_approval"):
                 approval = result
             messages.append({"role": "tool", "content": json.dumps(result)})
@@ -893,6 +1007,11 @@ class StreamAsk:
 
 def _ask_stream(sa):
     print(f"Querying Ollama model '{OLLAMA_MODEL}'...")
+    quick = _quick_reply(sa._text)
+    if quick:
+        sa.full_text = quick
+        yield quick
+        return
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": sa._text},
@@ -929,10 +1048,22 @@ def _ask_stream(sa):
                     raise RuntimeError("The model called tools too many times; giving up.")
                 messages.append({"role": "assistant", "content": content})
                 name, args = inline
-                result = run_tool(name, args)
+                result = _guarded_run(name, args, sa._text)
                 if result.get("needs_approval"):
                     sa.approval = result
                 messages.append({"role": "tool", "content": json.dumps(result)})
+                continue
+            unknown = _unknown_tool_name(content)
+            if unknown:
+                tool_rounds += 1
+                if tool_rounds > 5:
+                    raise RuntimeError("The model called tools too many times; giving up.")
+                messages.append({"role": "assistant", "content": content})
+                messages.append({
+                    "role": "tool",
+                    "content": json.dumps({"error": f"Unknown tool '{unknown}'. Only use the "
+                                               "tools listed; otherwise answer directly."}),
+                })
                 continue
             # Final answer — stream it.
             if sa.approval is None:
@@ -958,7 +1089,7 @@ def _ask_stream(sa):
         for call in tool_calls:
             name = call.function.name
             args = call.function.arguments or {}
-            result = run_tool(name, args)
+            result = _guarded_run(name, args, sa._text)
             if result.get("needs_approval"):
                 sa.approval = result
             messages.append({"role": "tool", "content": json.dumps(result)})
