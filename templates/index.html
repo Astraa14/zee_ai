@@ -174,6 +174,17 @@
             font-weight: bold;
         }
 
+        .stream-text::after {
+            content: '▍';
+            animation: blink 1s steps(2) infinite;
+        }
+
+        @keyframes blink {
+            50% {
+                opacity: 0;
+            }
+        }
+
         .status-text {
             color: #666;
             font-style: italic;
@@ -313,36 +324,65 @@
         }
 
         // ==========================================
-        // Shared ask flow (mic + text input)
+        // Shared ask flow (mic + text input, streaming)
         // ==========================================
         let pendingApprovalId = null;
 
         function sendAsk(text) {
+            logDiv.innerHTML += `<div class="status-text">Querying cognitive processor...</div>`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+
+            const streamEl = document.createElement('div');
+            streamEl.className = 'jarvis-text';
+            streamEl.innerHTML = '<b>JARVIS:</b> <span class="stream-text"></span>';
+            logDiv.appendChild(streamEl);
+            const textEl = streamEl.querySelector('.stream-text');
+
             fetch('/ask', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ text: text })
             })
-                .then(response => response.json())
-                .then(handleAskResponse)
+                .then(response => {
+                    if (!response.ok) throw new Error('HTTP ' + response.status);
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = '';
+                    const pump = () => reader.read().then(({ done, value }) => {
+                        if (done) return;
+                        buffer += decoder.decode(value, { stream: true });
+                        let nl;
+                        while ((nl = buffer.indexOf('\n')) !== -1) {
+                            const line = buffer.slice(0, nl).trim();
+                            buffer = buffer.slice(nl + 1);
+                            if (line) {
+                                try {
+                                    handleLine(JSON.parse(line), textEl);
+                                } catch (e) { }
+                            }
+                        }
+                        return pump();
+                    });
+                    return pump();
+                })
                 .catch(err => {
                     logDiv.innerHTML += `<div class="status-text" style="color: red;">Error contacting core.</div>`;
                     resetUI();
                 });
         }
 
-        function handleAskResponse(data) {
-            logDiv.innerHTML += `<div class="jarvis-text"><b>JARVIS:</b> ${data.reply}</div>`;
-            logDiv.scrollTop = logDiv.scrollHeight;
-
-            if (data.approval_id) {
+        function handleLine(data, textEl) {
+            if (data.delta) {
+                textEl.textContent += data.delta;
+                logDiv.scrollTop = logDiv.scrollHeight;
+            } else if (data.approval_id) {
                 pendingApprovalId = data.approval_id;
                 document.getElementById('approval-message').textContent =
                     data.approval_message || 'JARVIS is requesting to take an action on this computer.';
                 document.getElementById('approval-overlay').style.display = 'flex';
-                return;
+            } else if (data.done) {
+                resetUI();
             }
-            resetUI();
         }
 
         function closeApproval() {

@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import os
 import re
@@ -14,23 +15,31 @@ import edge_tts
 import ollama
 import pygame
 
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:latest")
 JARVIS_VOICE = os.getenv("JARVIS_VOICE", "en-US-ChristopherNeural")
 JARVIS_RATE = os.getenv("JARVIS_RATE", "+10%")
+JARVIS_MAX_TOKENS = int(os.getenv("JARVIS_MAX_TOKENS", "150"))
+JARVIS_TEMPERATURE = float(os.getenv("JARVIS_TEMPERATURE", "0.7"))
+JARVIS_KEEP_ALIVE = os.getenv("JARVIS_KEEP_ALIVE", "30m")
+JARVIS_NUM_CTX = int(os.getenv("JARVIS_NUM_CTX", "4096"))
+JARVIS_AUDIO_BUFFER = int(os.getenv("JARVIS_AUDIO_BUFFER", "16384"))
 
 SYSTEM_PROMPT = (
     "You are JARVIS, a helpful AI assistant. Keep your answers brief, "
     "conversational, and under 3 sentences. Do not use any special formatting "
     "or symbols like asterisks, as they will be read out loud by a text-to-speech engine. "
-    "You have access to tools. Use them whenever they would help the user, "
-    "then give a short summary of the result."
+    "Only call a tool when the user's request clearly needs it (e.g. the time, "
+    "weather, a web search, system info, or a computer action). Otherwise answer directly. "
+    "After a tool runs, give a short summary of the result. "
+    "IMPORTANT: if a tool result contains 'needs_approval', the action was NOT "
+    "performed — ask the user for permission and never claim it happened."
 )
 
 _play_lock = threading.Lock()
 
 
 # ==========================================
-# MOUTH (Text-to-Speech)
+# MOUTH (Text-to-Speech, streamed playback)
 # ==========================================
 def _ensure_mixer():
     if not pygame.mixer.get_init():
@@ -50,27 +59,47 @@ def _play_audio_file(path):
 def speak(text, wait=False):
     """Generate TTS audio and play it through the speakers.
 
-    By default this runs in a background thread so the caller is not blocked.
-    Pass wait=True to block until playback finishes (e.g. from a single-threaded loop).
+    Audio starts as soon as enough of the stream has arrived, so the reply
+    is heard well before the full file is downloaded. By default this runs
+    in a background thread; pass wait=True to block until playback finishes.
     """
     print(f"JARVIS: {text}")
 
-    async def get_audio(path):
+    async def generate(path, ready):
         communicate = edge_tts.Communicate(text, JARVIS_VOICE, rate=JARVIS_RATE)
-        await communicate.save(path)
+        written = 0
+        with open(path, "wb") as f:
+            stream = communicate.stream()
+            async for chunk in stream:
+                if chunk["type"] == "audio":
+                    f.write(chunk["data"])
+                    written += len(chunk["data"])
+                    if not ready.is_set() and written >= JARVIS_AUDIO_BUFFER:
+                        f.flush()
+                        ready.set()
+            f.flush()
+        ready.set()
 
     def worker():
+        fd, path = tempfile.mkstemp(suffix=".mp3", prefix="jarvis_")
+        os.close(fd)
+        ready = threading.Event()
+        writer = threading.Thread(
+            target=lambda: asyncio.run(generate(path, ready)), daemon=True
+        )
+        writer.start()
         try:
-            fd, path = tempfile.mkstemp(suffix=".mp3", prefix="jarvis_")
-            os.close(fd)
-            try:
-                asyncio.run(get_audio(path))
-                _play_audio_file(path)
-            finally:
-                if os.path.exists(path):
-                    os.remove(path)
+            ready.wait(timeout=15)
+            _play_audio_file(path)
+            writer.join(timeout=60)
         except Exception as e:
             print(f"Audio error: {e}")
+        finally:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
     if wait:
         worker()
@@ -85,6 +114,12 @@ def _fetch_json(url, timeout=10):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8", "replace"))
+
+
+def _filter_args(func, args):
+    """Drop arguments the tool function doesn't accept (models can pass junk)."""
+    sig = inspect.signature(func)
+    return {k: v for k, v in (args or {}).items() if k in sig.parameters}
 
 
 def tool_get_time():
@@ -623,7 +658,7 @@ _pending_approvals = {}
 _approval_lock = threading.Lock()
 
 
-def _request_approval(name, args):
+def request_approval(name, args):
     """Register a dangerous action for later approval and return a needs_approval result."""
     aid = uuid.uuid4().hex[:8]
     with _approval_lock:
@@ -641,6 +676,29 @@ def _request_approval(name, args):
     }
 
 
+def maybe_request_approval(user_text):
+    """Safety net: if the user asked for a dangerous action but the model didn't
+    call a tool, register the approval anyway so the flow always works."""
+    t = (user_text or "").lower()
+    if re.search(r"\b(shut\s?down|power\s?off|turn\s?off)\b.*\b(computer|pc|machine|laptop|system)\b", t) or \
+       re.fullmatch(r"\s*(shut\s?down|power\s?off)\s*[.!]*\s*", t):
+        return request_approval("system_action", {"action": "shutdown"})
+    if re.search(r"\b(restart|reboot)\b", t):
+        return request_approval("system_action", {"action": "restart"})
+    if re.search(r"\b(hibernate|sleep)\b.*\b(computer|pc|system|laptop)\b", t):
+        return request_approval("system_action", {"action": "sleep"})
+    if re.search(r"\blog\s?off\b|\bsign\s?out\b", t):
+        return request_approval("system_action", {"action": "logoff"})
+    if re.search(r"\block\b.*\b(computer|pc|screen)\b", t):
+        return request_approval("system_action", {"action": "lock"})
+    m = re.search(r"\b(kill|close|terminate|stop)\s+(?:the\s+)?([a-z][a-z0-9 ._-]{1,24})", t)
+    if m:
+        name = m.group(2).split()[0].removesuffix(".exe")
+        if name in _KNOWN_APPS or name.endswith("app") or name.endswith("application") or name.endswith("browser"):
+            return request_approval("kill_process", {"name": name})
+    return None
+
+
 def approve_action(action_id):
     """Execute a previously requested dangerous action. Returns the result dict."""
     with _approval_lock:
@@ -649,7 +707,7 @@ def approve_action(action_id):
         return {"error": "Approval expired or not found."}
     func = _TOOL_FUNCS[item["name"]]
     try:
-        result = func(**item["args"]) if item["args"] else func()
+        result = func(**_filter_args(func, item["args"])) if item["args"] else func()
     except Exception as e:
         result = {"error": f"{item['name']} failed: {e}"}
     print(f"  [approved] {item['name']}({json.dumps(item['args'])}) -> {json.dumps(result)}")
@@ -669,9 +727,9 @@ def run_tool(name, args):
     if not func:
         return {"error": f"Unknown tool: {name}"}
     if name in DANGEROUS_TOOLS:
-        return _request_approval(name, args)
+        return request_approval(name, args)
     try:
-        result = func(**args) if args else func()
+        result = func(**_filter_args(func, args)) if args else func()
     except Exception as e:
         result = {"error": f"{name} failed: {e}"}
     print(f"  [tool] {name}({json.dumps(args)}) -> {json.dumps(result)}")
@@ -679,7 +737,7 @@ def run_tool(name, args):
 
 
 # ==========================================
-# BRAIN (Ollama with function calling)
+# BRAIN (Ollama, kept warm and capped)
 # ==========================================
 class AskResult:
     """Result of a conversation turn. approval is set when a dangerous action
@@ -690,11 +748,54 @@ class AskResult:
         self.approval = approval
 
 
-def _chat(messages, tools):
-    kwargs = {"model": OLLAMA_MODEL, "messages": messages}
+def _chat(messages, tools, stream=False):
+    kwargs = {
+        "model": OLLAMA_MODEL,
+        "messages": messages,
+        "keep_alive": JARVIS_KEEP_ALIVE,
+        "options": {
+            "num_predict": JARVIS_MAX_TOKENS,
+            "temperature": JARVIS_TEMPERATURE,
+            "num_ctx": JARVIS_NUM_CTX,
+        },
+    }
     if tools:
         kwargs["tools"] = tools
+    if stream:
+        kwargs["stream"] = True
     return ollama.chat(**kwargs)
+
+
+def warmup_model():
+    """Preload the model so the first request isn't slow. Call in a thread."""
+    try:
+        _chat([{"role": "user", "content": "hi"}], tools=None)
+        print(f"Model '{OLLAMA_MODEL}' warmed up.")
+    except Exception as e:
+        print(f"Warmup failed (will retry on first request): {e}")
+
+
+def _parse_inline_tool_call(content):
+    """Some models emit a tool call as raw (sometimes malformed) JSON text
+    instead of a structured tool_calls field. Detect it and return (name, args)
+    or None. Only matches known tool names."""
+    text = (content or "").strip()
+    if not (text.startswith("{") and text.endswith("}")):
+        return None
+    m = re.search(r'"name"\s*:\s*"([^"]+)"', text)
+    if not m or m.group(1) not in _TOOL_FUNCS:
+        return None
+    args = {}
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            fn = data["function"] if isinstance(data.get("function"), dict) else data
+            raw = fn.get("arguments") or data.get("parameters") or {}
+            if isinstance(raw, dict):
+                args = raw
+    except (json.JSONDecodeError, AttributeError):
+        pass
+    return m.group(1), args
 
 
 def ask_ollama(text):
@@ -725,6 +826,21 @@ def ask_ollama(text):
             raise
 
         if not response.message.tool_calls:
+            inline = _parse_inline_tool_call(response.message.content)
+            if inline is not None:
+                name, args = inline
+                if name in _TOOL_FUNCS:
+                    tool_rounds += 1
+                    if tool_rounds > 5:
+                        raise RuntimeError("The model called tools too many times; giving up.")
+                    messages.append({"role": "assistant", "content": response.message.content})
+                    result = run_tool(name, args)
+                    if result.get("needs_approval"):
+                        approval = result
+                    messages.append({"role": "tool", "content": json.dumps(result)})
+                    continue
+            if approval is None:
+                approval = maybe_request_approval(text)
             return AskResult(response.message.content, approval=approval)
 
         tool_rounds += 1
@@ -738,4 +854,94 @@ def ask_ollama(text):
             result = run_tool(name, args)
             if result.get("needs_approval"):
                 approval = result
+            messages.append({"role": "tool", "content": json.dumps(result)})
+
+
+class StreamAsk:
+    """Streaming variant of ask_ollama.
+
+    Iterate over it to receive text deltas as the model generates them.
+    When iteration finishes, .full_text holds the complete reply and
+    .approval is set if a dangerous action is awaiting confirmation.
+    """
+
+    def __init__(self, text):
+        self._text = text
+        self.full_text = ""
+        self.approval = None
+
+    def __iter__(self):
+        yield from _ask_stream(self)
+
+
+def _ask_stream(sa):
+    print(f"Querying Ollama model '{OLLAMA_MODEL}'...")
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": sa._text},
+    ]
+    tools = TOOLS
+    tool_rounds = 0
+
+    while True:
+        try:
+            response = _chat(messages, tools, stream=True)
+        except Exception as e:
+            if tools:
+                # Model probably doesn't support function calling — retry without tools.
+                print(f"Tool calling failed ({e}); retrying without tools.")
+                tools = None
+                continue
+            raise
+
+        buffered = []
+        tool_calls = []
+        for chunk in response:
+            if chunk.message.content:
+                buffered.append(chunk.message.content)
+            if chunk.message.tool_calls:
+                tool_calls.extend(chunk.message.tool_calls)
+
+        if not tool_calls:
+            # Maybe the model emitted a tool call as inline JSON text instead.
+            content = "".join(buffered)
+            inline = _parse_inline_tool_call(content)
+            if inline is not None and inline[0] in _TOOL_FUNCS:
+                tool_rounds += 1
+                if tool_rounds > 5:
+                    raise RuntimeError("The model called tools too many times; giving up.")
+                messages.append({"role": "assistant", "content": content})
+                name, args = inline
+                result = run_tool(name, args)
+                if result.get("needs_approval"):
+                    sa.approval = result
+                messages.append({"role": "tool", "content": json.dumps(result)})
+                continue
+            # Final answer — stream it.
+            if sa.approval is None:
+                sa.approval = maybe_request_approval(sa._text)
+            for piece in buffered:
+                sa.full_text += piece
+                yield piece
+            return
+
+        # The model wants to call tools — execute them, then continue streaming.
+        tool_rounds += 1
+        if tool_rounds > 5:
+            raise RuntimeError("The model called tools too many times; giving up.")
+
+        messages.append({
+            "role": "assistant",
+            "content": "".join(buffered) or None,
+            "tool_calls": [
+                {"function": {"name": tc.function.name, "arguments": tc.function.arguments or {}}}
+                for tc in tool_calls
+            ],
+        })
+        for call in tool_calls:
+            name = call.function.name
+            args = call.function.arguments or {}
+            result = run_tool(name, args)
+            if result.get("needs_approval"):
+                sa.approval = result
             messages.append({"role": "tool", "content": json.dumps(result)})

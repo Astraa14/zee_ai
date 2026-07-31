@@ -1,10 +1,33 @@
+import json
 import os
+import threading
 
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, Response, render_template, request, jsonify
 
 import jarvis_core
 
 app = Flask(__name__)
+
+
+def _stream_reply(text):
+    """Generator: yields NDJSON lines (delta / approval / done) as the model replies."""
+    try:
+        stream = jarvis_core.StreamAsk(text)
+        for delta in stream:
+            yield json.dumps({"delta": delta}) + "\n"
+        if stream.approval:
+            jarvis_core.speak(stream.full_text + " Please approve or cancel on the screen.")
+            yield json.dumps({
+                "approval_id": stream.approval["id"],
+                "approval_message": stream.approval["message"],
+            }) + "\n"
+        else:
+            jarvis_core.speak(stream.full_text)
+    except Exception as e:
+        print(f"Ollama error: {e}")
+        msg = "I am having trouble connecting to my cognitive processor."
+        yield json.dumps({"delta": msg}) + "\n"
+    yield json.dumps({"done": True}) + "\n"
 
 
 @app.route("/")
@@ -20,29 +43,21 @@ def ask():
     if "open notepad" in text:
         os.system("start notepad")
         reply = "Opening Notepad, sir."
+        jarvis_core.speak(reply)
+        return Response(
+            json.dumps({"delta": reply}) + "\n" + json.dumps({"done": True}) + "\n",
+            mimetype="application/x-ndjson",
+        )
     elif "open calculator" in text:
         os.system("start calc")
         reply = "Opening Calculator."
-    else:
-        try:
-            result = jarvis_core.ask_ollama(text)
-        except Exception as e:
-            print(f"Ollama error: {e}")
-            reply = "I am having trouble connecting to my cognitive processor."
-            jarvis_core.speak(reply)
-            return jsonify({"reply": reply})
+        jarvis_core.speak(reply)
+        return Response(
+            json.dumps({"delta": reply}) + "\n" + json.dumps({"done": True}) + "\n",
+            mimetype="application/x-ndjson",
+        )
 
-        reply = result.text
-        if result.approval:
-            jarvis_core.speak(reply + " Please approve or cancel on the screen.")
-            return jsonify({
-                "reply": reply,
-                "approval_id": result.approval["id"],
-                "approval_message": result.approval["message"],
-            })
-
-    jarvis_core.speak(reply)
-    return jsonify({"reply": reply})
+    return Response(_stream_reply(text), mimetype="application/x-ndjson")
 
 
 @app.route("/approve", methods=["POST"])
@@ -74,5 +89,7 @@ def _describe_result(result):
 
 
 if __name__ == "__main__":
+    # Preload the model in the background so the first question is fast.
+    threading.Thread(target=jarvis_core.warmup_model, daemon=True).start()
     debug = os.getenv("FLASK_DEBUG", "1") == "1"
     app.run(host="0.0.0.0", port=5000, debug=debug)

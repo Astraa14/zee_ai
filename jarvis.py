@@ -81,6 +81,10 @@ def main():
     samplerate = 16000
     pending_approval = None
 
+    # Preload the model so the first question isn't slow.
+    import threading
+    threading.Thread(target=jarvis_core.warmup_model, daemon=True).start()
+
     with sd.RawInputStream(samplerate=samplerate, blocksize=8000, dtype='int16',
                            channels=1, callback=audio_callback):
         rec = vosk.KaldiRecognizer(model, samplerate)

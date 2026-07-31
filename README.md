@@ -14,6 +14,8 @@ A lightweight JARVIS-style assistant that runs **fully offline for speech** and 
 - 🎙️ Browser voice input (Chrome/Edge Web Speech API) *or* offline desktop
   microphone (Vosk + sounddevice)
 - 🧠 Local AI brain via **Ollama** (no cloud API needed)
+- ⚡ **Fast replies** — model kept warm in RAM, answers streamed to the screen
+  token-by-token, audio starts playing while it's still downloading
 - 🛠️ **Function calling** — JARVIS can take real actions (see [Tools](#tools))
 - 🖥️ **PC control** — volume, media, brightness, screenshots, typing, folders
   (see [PC control](#pc-control))
@@ -27,12 +29,13 @@ A lightweight JARVIS-style assistant that runs **fully offline for speech** and 
 
 - **Python 3.9+**
 - **Ollama** installed and running locally, with a **tool-capable** model.
-  The default is `llama3.1:8b` (supports function calling). `llama3`, `llama3.2`,
-  `qwen3` and `gemma3` also work — `llama3` will simply skip tools:
+  The default is `llama3.2` — fast and tool-capable. Prefer `llama3.1:8b`
+  (set `OLLAMA_MODEL=llama3.1:8b`) for more accurate answers; `llama3` works
+  but skips tools:
 
   ```sh
   ollama serve
-  ollama pull llama3.1:8b     # default, recommended for full tool support
+  ollama pull llama3.2     # default — fastest tool-capable option
   ```
 
 - For the desktop voice loop only: a working microphone and a **Vosk model**
@@ -158,12 +161,31 @@ Example commands to try:
 
 Set any of these environment variables before running:
 
-| Variable        | Default                    | Description                         |
-| --------------- | -------------------------- | ----------------------------------- |
-| `OLLAMA_MODEL`  | `llama3.1:8b`               | Ollama model used for answers/tools |
-| `JARVIS_VOICE`  | `en-US-ChristopherNeural`  | edge-tts voice (see `edge-tts --list`) |
-| `JARVIS_RATE`   | `+10%`                     | Speech speed adjustment             |
-| `FLASK_DEBUG`   | `1`                        | Flask auto-reloader on/off (`app.py`) |
+| Variable              | Default                  | Description                                 |
+| --------------------- | ------------------------ | ------------------------------------------- |
+| `OLLAMA_MODEL`        | `llama3.2:latest`        | Ollama model used for answers/tools         |
+| `JARVIS_VOICE`        | `en-US-ChristopherNeural`| edge-tts voice (see `edge-tts --list`)      |
+| `JARVIS_RATE`         | `+10%`                   | Speech speed adjustment                     |
+| `JARVIS_MAX_TOKENS`   | `150`                    | Max reply length — lower = faster answers   |
+| `JARVIS_TEMPERATURE`  | `0.7`                    | Model creativity                            |
+| `JARVIS_NUM_CTX`      | `4096`                   | Context window — lower = less VRAM, faster  |
+| `JARVIS_KEEP_ALIVE`   | `30m`                    | How long the model stays loaded in RAM      |
+| `JARVIS_AUDIO_BUFFER` | `16384`                  | Bytes of audio before playback starts       |
+| `FLASK_DEBUG`         | `1`                      | Flask auto-reloader on/off (`app.py`)       |
+
+## How fast replies work
+
+1. On startup, the model is **preloaded in the background** and kept in memory
+   (`JARVIS_KEEP_ALIVE`), so the first question isn't a cold start.
+2. While the model thinks, the web UI shows a status line; answers then
+   **stream token-by-token** into the log instead of appearing all at once.
+3. Audio starts playing after ~16 KB of speech has been synthesized
+   (`JARVIS_AUDIO_BUFFER`), so JARVIS talks while the rest of the audio is
+   still downloading.
+4. Replies are capped at `JARVIS_MAX_TOKENS` so JARVIS gets to the point.
+
+If your model doesn't support tools, JARVIS automatically falls back to plain
+chat — the tools are simply skipped.
 
 ## Project layout
 
