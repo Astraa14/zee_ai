@@ -31,10 +31,89 @@ SYSTEM_PROMPT = (
     "weather, a web search, system info, or a computer action). Otherwise answer directly. "
     "Never invent tool names that do not exist; only use the tools listed. "
     "If you do not know the answer, say so instead of guessing. "
+    "If a tool call was refused, never bring up that tool again — just answer the "
+    "user's actual question. "
+    "When the user states where they are (e.g. 'I'm in Batangas'), trust them over "
+    "IP geolocation for later questions. "
     "After a tool runs, give a short summary of the result. "
     "IMPORTANT: if a tool result contains 'needs_approval', the action was NOT "
     "performed — ask the user for permission and never claim it happened."
 )
+
+# ---------------- MEMORY (conversation history + learned facts) ----------------
+_MEMORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory.json")
+_memory = {}
+_memory_lock = threading.Lock()
+_history = []  # in-memory conversation turns (user/assistant pairs)
+_MAX_HISTORY = 8
+
+
+def _load_memory():
+    global _memory
+    try:
+        with open(_MEMORY_FILE, encoding="utf-8") as f:
+            _memory = json.load(f)
+    except (OSError, ValueError):
+        _memory = {}
+
+
+def _save_memory():
+    try:
+        with open(_MEMORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(_memory, f, indent=2)
+    except OSError:
+        pass
+
+
+def _extract_facts(text):
+    """Learn facts (location, name) from what the user said."""
+    low = (text or "").lower()
+    m = re.search(
+        r"\b(?:i'?m|i am|i live|i'?m living|i'?m based|am)\s+"
+        r"(?:actually|currently|right now|now|here)?\s*(?:at|in|from|near)\s+"
+        r"([a-z][a-z .'\-]{0,40}?)\b",
+        low,
+    )
+    if m:
+        loc = m.group(1).strip(" .,")
+        loc = loc.split(" not ")[0].strip()
+        if loc and loc not in ("here", "there", "home", "the"):
+            _memory["location"] = loc.title()
+            _save_memory()
+    m = re.search(r"\b(?:call me|my name is|name'?s)\s+([a-z][a-z'\-]{0,20})\b", low)
+    if m:
+        _memory["name"] = m.group(1).capitalize()
+        _save_memory()
+
+
+def _fact_block():
+    with _memory_lock:
+        loc = _memory.get("location")
+        name = _memory.get("name")
+    parts = []
+    if name:
+        parts.append(f"The user's name is {name}.")
+    if loc:
+        parts.append(f"The user's stated location is {loc}.")
+    return " ".join(parts)
+
+
+def _system_prompt():
+    facts = _fact_block()
+    return SYSTEM_PROMPT + (" " + facts if facts else "")
+
+
+def _remember(user_text, reply):
+    """Keep the last few turns so JARVIS can follow conversations."""
+    with _memory_lock:
+        _history.extend([
+            {"role": "user", "content": user_text},
+            {"role": "assistant", "content": reply},
+        ])
+        del _history[: -_MAX_HISTORY]
+
+
+_load_memory()
 
 _play_lock = threading.Lock()
 _mixer_lock = threading.Lock()
@@ -142,8 +221,13 @@ def _filter_args(func, args):
     for k, v in (args or {}).items():
         if k not in sig.parameters:
             continue
-        if isinstance(v, dict) and set(v.keys()) <= {"type", "value"}:
-            v = v.get("value", v.get("type"))
+        if isinstance(v, dict) and ({"type", "value", "description"} & set(v.keys())):
+            for key in ("value", "description", "type"):
+                if key in v and v[key] not in ("string", "number", "integer", "boolean", "object", "array"):
+                    v = v[key]
+                    break
+            else:
+                v = ""
         cleaned[k] = v
     return cleaned
 
@@ -154,7 +238,11 @@ def tool_get_time():
 
 
 def tool_get_location():
-    """Best-effort IP geolocation: approximate city/country of this computer."""
+    """Return the user's stated location when known; otherwise IP geolocation."""
+    with _memory_lock:
+        stated = _memory.get("location")
+    if stated:
+        return {"city": stated.title(), "country": None, "source": "user-stated"}
     for url in ("http://ip-api.com/json/", "https://ipapi.co/json/"):
         try:
             data = _fetch_json(url, timeout=8)
@@ -191,18 +279,39 @@ _KNOWN_APPS = {
     "paint": "mspaint",
     "word": "winword",
     "excel": "excel",
+    "youtube": "https://www.youtube.com",
+    "google": "https://www.google.com",
+    "gmail": "https://mail.google.com",
+    "facebook": "https://www.facebook.com",
+    "instagram": "https://www.instagram.com",
+    "twitter": "https://x.com",
+    "x": "https://x.com",
+    "netflix": "https://www.netflix.com",
+    "spotify": "https://open.spotify.com",
+    "github": "https://github.com",
+    "maps": "https://maps.google.com",
+    "maps google": "https://maps.google.com",
+    "whatsapp": "https://web.whatsapp.com",
 }
+
+_SITE_SUFFIX_RE = re.compile(r"\.(com|net|org|io|tv|me|co|ph|app|ai)$")
 
 
 def tool_open_app(app):
     if os.name != "nt":
         return {"error": "App launching is only supported on Windows."}
     app = (app or "").strip().lower()
-    target = _KNOWN_APPS.get(app, app)
-    if not re.fullmatch(r"[a-z0-9 ._-]+", target):
-        return {"error": f"Unsupported application name: {app!r}"}
-    code = os.system(f"start {target}")
-    return {"opened": target, "command_exit_code": code}
+    target = _KNOWN_APPS.get(app) or _KNOWN_APPS.get(app.replace(" ", "")) or app
+    if target.startswith("https://") or target.startswith("http://"):
+        os.system(f'start "" "{target}"')
+        return {"opened_website": target}
+    if re.fullmatch(r"[a-z0-9 ._-]+", target):
+        code = os.system(f"start {target}")
+        return {"opened": target, "command_exit_code": code}
+    if "." in target and not target.startswith(("cmd", "exe", "msi")) or _SITE_SUFFIX_RE.search(target):
+        os.system(f'start "" "https://{target}"')
+        return {"opened_website": f"https://{target}"}
+    return {"error": f"Unsupported application name: {app!r}"}
 
 
 def tool_system_info():
@@ -531,7 +640,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "open_app",
-            "description": "Open a desktop application (e.g. notepad, calculator, browser, paint, terminal).",
+            "description": "Open a desktop application (e.g. notepad, calculator, browser, paint, terminal) or a website (e.g. youtube, google, gmail, facebook, netflix).",
             "parameters": {
                 "type": "object",
                 "properties": {"app": {"type": "string", "description": "Name of the application to open"}},
@@ -899,7 +1008,8 @@ def _guarded_run(name, args, user_text):
     """Run a tool, refusing when the user never asked for it."""
     if _guard_blocked(name, user_text):
         return {"error": f"Do not use the '{name}' tool: the user did not ask for it. "
-                         "Answer their question directly instead."}
+                         "Never mention this tool again — answer the user's actual "
+                         "question directly instead."}
     return run_tool(name, args)
 
 
@@ -922,13 +1032,17 @@ def ask_ollama(text):
     to approve (approve_action) or cancel (deny_action) it.
     """
     print(f"Querying Ollama model '{OLLAMA_MODEL}'...")
+    _extract_facts(text)
     quick = _quick_reply(text)
     if quick:
+        _remember(text, quick)
         return AskResult(quick)
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": text},
+        {"role": "system", "content": _system_prompt()},
     ]
+    with _memory_lock:
+        messages.extend(_history)
+    messages.append({"role": "user", "content": text})
     tools = TOOLS
     tool_rounds = 0
     approval = None
@@ -972,6 +1086,7 @@ def ask_ollama(text):
                 continue
             if approval is None:
                 approval = maybe_request_approval(text)
+            _remember(text, response.message.content)
             return AskResult(response.message.content, approval=approval)
 
         tool_rounds += 1
@@ -1007,15 +1122,19 @@ class StreamAsk:
 
 def _ask_stream(sa):
     print(f"Querying Ollama model '{OLLAMA_MODEL}'...")
+    _extract_facts(sa._text)
     quick = _quick_reply(sa._text)
     if quick:
         sa.full_text = quick
+        _remember(sa._text, quick)
         yield quick
         return
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": sa._text},
+        {"role": "system", "content": _system_prompt()},
     ]
+    with _memory_lock:
+        messages.extend(_history)
+    messages.append({"role": "user", "content": sa._text})
     tools = TOOLS
     tool_rounds = 0
 
@@ -1071,6 +1190,7 @@ def _ask_stream(sa):
             for piece in buffered:
                 sa.full_text += piece
                 yield piece
+            _remember(sa._text, sa.full_text)
             return
 
         # The model wants to call tools — execute them, then continue streaming.

@@ -120,7 +120,8 @@ tool-capable model (see [Requirements](#requirements)).
 | Tool             | What it does                                        |
 | ---------------- | --------------------------------------------------- |
 | `get_time`       | Current date and time                               |
-| `open_app`       | Launch desktop apps (notepad, calculator, browser…) |
+| `get_location`   | Where the PC is (IP geolocation, or your stated location) |
+| `open_app`       | Launch desktop apps (notepad, calculator, browser…) **or websites** (youtube, google, gmail, facebook…) |
 | `system_info`    | CPU, RAM and battery usage                          |
 | `web_search`     | Web search (Wikipedia API, no key needed)           |
 | `get_weather`    | Current weather for any city (Open-Meteo, no key)   |
@@ -197,6 +198,20 @@ Set any of these environment variables before running:
 
 If your model doesn't support tools, JARVIS automatically falls back to plain
 chat — the tools are simply skipped.
+
+## Memory
+
+- JARVIS **remembers the last few turns** of conversation, so it can follow up
+  ("you mentioned earlier that you're in Batangas…").
+- Facts it learns from you — your **name** ("call me Ron", "my name is …") and
+  your **stated location** ("I'm in Batangas", "I live in …") — are saved to
+  `memory.json` and remembered across restarts. A stated location always wins
+  over IP geolocation.
+- Delete `memory.json` to wipe what it remembers.
+- Greetings ("hi", "hey jarvis"…) get an instant canned reply without touching
+  the model.
+- JARVIS refuses to run tools you didn't ask for (e.g. it won't change the
+  volume unless you mention volume), even if the model proposes it.
 
 ## Project layout
 

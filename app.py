@@ -1,6 +1,7 @@
 import ipaddress
 import json
 import os
+import re
 import socket
 import threading
 from datetime import datetime, timedelta, timezone
@@ -96,22 +97,16 @@ def ask():
     data = request.get_json(silent=True) or {}
     text = (data.get("text") or "").lower()
 
-    if "open notepad" in text:
-        os.system("start notepad")
-        reply = "Opening Notepad, sir."
-        jarvis_core.speak(reply)
-        return Response(
-            json.dumps({"delta": reply}) + "\n" + json.dumps({"done": True}) + "\n",
-            mimetype="application/x-ndjson",
-        )
-    elif "open calculator" in text:
-        os.system("start calc")
-        reply = "Opening Calculator."
-        jarvis_core.speak(reply)
-        return Response(
-            json.dumps({"delta": reply}) + "\n" + json.dumps({"done": True}) + "\n",
-            mimetype="application/x-ndjson",
-        )
+    m = re.fullmatch(r"open\s+(?:the\s+|a\s+)?(.{1,40})", text)
+    if m and not re.search(r"(where|what|how|why|when|about|with|help|door|window)", m.group(1)):
+        result = jarvis_core.run_tool("open_app", {"app": m.group(1)})
+        if result.get("opened") or result.get("opened_website"):
+            reply = f"Opening {m.group(1).title()}."
+            jarvis_core.speak(reply)
+            return Response(
+                json.dumps({"delta": reply}) + "\n" + json.dumps({"done": True}) + "\n",
+                mimetype="application/x-ndjson",
+            )
 
     return Response(_stream_reply(text), mimetype="application/x-ndjson")
 
