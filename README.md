@@ -15,6 +15,9 @@ A lightweight JARVIS-style assistant that runs **fully offline for speech** and 
   microphone (Vosk + sounddevice)
 - 🧠 Local AI brain via **Ollama** (no cloud API needed)
 - 🛠️ **Function calling** — JARVIS can take real actions (see [Tools](#tools))
+- 🖥️ **PC control** — volume, media, brightness, screenshots, typing, folders
+  (see [PC control](#pc-control))
+- 🛡️ **Approval gate** — destructive actions always ask for your OK first
 - 🗣️ Lifelike TTS with **edge-tts** (default: `en-US-ChristopherNeural`)
 - 💬 Text fallback so it works even without a microphone
 - ⌨️ Voice commands: open Notepad, Calculator, browser
@@ -99,18 +102,57 @@ JARVIS can call tools through the LLM's function-calling support. It will use
 them automatically when they help, then summarise the result. Requires a
 tool-capable model (see [Requirements](#requirements)).
 
-| Tool           | What it does                                        |
-| -------------- | --------------------------------------------------- |
-| `get_time`     | Current date and time                               |
-| `open_app`     | Launch desktop apps (notepad, calculator, browser…) |
-| `system_info`  | CPU, RAM and battery usage                          |
-| `web_search`   | Web search (Wikipedia API, no key needed)           |
-| `get_weather`  | Current weather for any city (Open-Meteo, no key)   |
-| `create_note`  | Append a note to `notes.txt`                        |
+| Tool             | What it does                                        |
+| ---------------- | --------------------------------------------------- |
+| `get_time`       | Current date and time                               |
+| `open_app`       | Launch desktop apps (notepad, calculator, browser…) |
+| `system_info`    | CPU, RAM and battery usage                          |
+| `web_search`     | Web search (Wikipedia API, no key needed)           |
+| `get_weather`    | Current weather for any city (Open-Meteo, no key)   |
+| `create_note`    | Append a note to `notes.txt`                        |
 
 If your model doesn't support tools, JARVIS automatically falls back to plain
 chat — the tools are simply skipped. `web_search` and `get_weather` need an
 internet connection.
+
+## PC control
+
+> Windows only. Requires `pycaw` (volume) and `Pillow` (screenshots), which are
+> in `requirements.txt`.
+
+| Tool             | What it does                                              |
+| ---------------- | --------------------------------------------------------- |
+| `set_volume`     | Set master volume to a percentage (0–100)                 |
+| `adjust_volume`  | Volume up / down / mute / unmute                          |
+| `media_control`  | Play/pause, next, previous, stop the active media         |
+| `set_brightness` | Screen brightness (not supported on all monitors)         |
+| `screenshot`     | Save a screenshot to `screenshots/`                       |
+| `type_text`      | Type text into the focused window                         |
+| `open_folder`    | Open a folder/file path in Explorer                       |
+| `kill_process`   | ⚠️ Terminate an app by process name (e.g. `chrome`)       |
+| `system_action`  | ⚠️ Shutdown, restart, sleep, hibernate, log off or lock   |
+
+### Approval gate (safety)
+
+`kill_process` and `system_action` (marked ⚠️) **never run automatically**.
+JARVIS first asks for your permission and executes the action only after you
+confirm:
+
+- **Web UI** — a red-tinted *AUTHORIZATION REQUIRED* dialog with **Approve /
+  Cancel** buttons appears.
+- **Voice loop** — JARVIS asks *"Do you want me to…"* and waits for you to say
+  *"yes"* or *"no"*.
+
+Pending approvals expire after 2 minutes. System-critical processes (explorer,
+svchost, lsass, etc.) are always refused even when approved.
+
+Example commands to try:
+- `"set the volume to 30"`
+- `"pause the music"` / `"next track"`
+- `"take a screenshot"`
+- `"open my documents folder"` (needs the path, e.g. `C:\Users\You\Documents`)
+- `"close chrome"` → asks for approval
+- `"restart my computer"` → asks for approval
 
 ## Configuration
 

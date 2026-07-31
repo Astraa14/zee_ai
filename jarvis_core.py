@@ -2,10 +2,13 @@ import asyncio
 import json
 import os
 import re
+import subprocess
 import tempfile
 import threading
+import time
 import urllib.parse
 import urllib.request
+import uuid
 
 import edge_tts
 import ollama
@@ -211,6 +214,219 @@ def tool_create_note(content):
     return {"saved_to": notes_file}
 
 
+# ==========================================
+# HANDS (PC Control)
+# ==========================================
+def _press_vk(vk):
+    """Press and release a virtual-key code using keybd_event."""
+    import ctypes
+    ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
+    ctypes.windll.user32.keybd_event(vk, 0, 2, 0)
+
+
+def _type_unicode(text):
+    """Type arbitrary text into the focused window via SendInput (KEYEVENTF_UNICODE)."""
+    import ctypes
+    from ctypes import wintypes
+
+    KEYEVENTF_KEYUP = 0x0002
+    KEYEVENTF_UNICODE = 0x0004
+    INPUT_KEYBOARD = 1
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", wintypes.WORD),
+            ("wScan", wintypes.WORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ctypes.c_void_p),
+        ]
+
+    class _INPUT_UNION(ctypes.Union):
+        _fields_ = [("ki", KEYBDINPUT)]
+
+    class INPUT(ctypes.Structure):
+        _fields_ = [("type", wintypes.DWORD), ("u", _INPUT_UNION)]
+
+    def _input(ch, up):
+        ki = KEYBDINPUT()
+        ki.wScan = ord(ch)
+        ki.dwFlags = KEYEVENTF_UNICODE | (KEYEVENTF_KEYUP if up else 0)
+        return INPUT(type=INPUT_KEYBOARD, u=_INPUT_UNION(ki=ki))
+
+    for ch in text:
+        for up in (False, True):
+            ctypes.windll.user32.SendInput(1, ctypes.byref(_input(ch, up)), ctypes.sizeof(INPUT))
+
+
+def _endpoint_volume():
+    from pycaw.pycaw import AudioUtilities
+    return AudioUtilities.GetSpeakers().EndpointVolume
+
+
+def tool_set_volume(percent):
+    if os.name != "nt":
+        return {"error": "Volume control is only supported on Windows."}
+    try:
+        pct = float(percent)
+    except (TypeError, ValueError):
+        return {"error": f"Invalid volume: {percent!r}"}
+    pct = max(0, min(100, pct))
+    try:
+        _endpoint_volume().SetMasterVolumeLevelScalar(pct / 100, None)
+    except Exception as e:
+        return {"error": f"set_volume failed: {e}"}
+    return {"volume_percent": pct}
+
+
+def tool_adjust_volume(direction):
+    if os.name != "nt":
+        return {"error": "Volume control is only supported on Windows."}
+    direction = (direction or "").strip().lower()
+    try:
+        if direction == "mute":
+            _endpoint_volume().SetMute(1, None)
+            return {"adjusted": "mute"}
+        if direction == "unmute":
+            _endpoint_volume().SetMute(0, None)
+            return {"adjusted": "unmute"}
+        if direction == "up":
+            _press_vk(0xAF)  # VK_VOLUME_UP
+            return {"adjusted": "up"}
+        if direction == "down":
+            _press_vk(0xAE)  # VK_VOLUME_DOWN
+            return {"adjusted": "down"}
+        return {"error": f"Unknown direction: {direction!r}. Use up, down, mute or unmute."}
+    except Exception as e:
+        return {"error": f"adjust_volume failed: {e}"}
+
+
+_MEDIA_KEYS = {
+    "play/pause": 0xB3,
+    "playpause": 0xB3,
+    "play": 0xB3,
+    "pause": 0xB3,
+    "next": 0xB0,
+    "next track": 0xB0,
+    "previous": 0xB1,
+    "previous track": 0xB1,
+    "prev": 0xB1,
+    "stop": 0xB2,
+}
+
+
+def tool_media_control(action):
+    if os.name != "nt":
+        return {"error": "Media control is only supported on Windows."}
+    key = _MEDIA_KEYS.get((action or "").strip().lower())
+    if key is None:
+        return {"error": f"Unknown media action: {action!r}. Use play/pause, next, previous or stop."}
+    _press_vk(key)
+    return {"action": (action or "").strip().lower()}
+
+
+def tool_set_brightness(percent):
+    if os.name != "nt":
+        return {"error": "Brightness control is only supported on Windows."}
+    try:
+        pct = int(percent)
+    except (TypeError, ValueError):
+        return {"error": f"Invalid brightness: {percent!r}"}
+    pct = max(0, min(100, pct))
+    cmd = ["powershell", "-NoProfile", "-Command",
+           f"(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1,{pct})"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+    except Exception as e:
+        return {"error": f"set_brightness failed: {e}"}
+    if result.returncode != 0:
+        return {"error": "Brightness not supported on this system."}
+    return {"brightness_percent": pct}
+
+
+def tool_screenshot():
+    from datetime import datetime
+    from PIL import ImageGrab
+    folder = os.path.join(os.getcwd(), "screenshots")
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, f"screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+    try:
+        ImageGrab.grab().save(path)
+    except Exception as e:
+        return {"error": f"screenshot failed: {e}"}
+    return {"saved_to": path}
+
+
+def tool_type_text(text):
+    if os.name != "nt":
+        return {"error": "Typing is only supported on Windows."}
+    text = text or ""
+    if not text:
+        return {"error": "No text to type."}
+    try:
+        _type_unicode(text)
+    except Exception as e:
+        return {"error": f"type_text failed: {e}"}
+    return {"typed_chars": len(text)}
+
+
+def tool_open_folder(path):
+    if os.name != "nt":
+        return {"error": "Opening folders is only supported on Windows."}
+    path = (path or "").strip().strip('"')
+    if not path:
+        return {"error": "No path provided."}
+    if not os.path.exists(path):
+        return {"error": f"Path not found: {path}"}
+    os.startfile(path)
+    return {"opened": path}
+
+
+_PROTECTED_PROCESSES = {
+    "system", "registry", "wininit", "winlogon", "csrss", "smss", "services",
+    "lsass", "explorer", "svchost", "dwm", "taskhost", "taskhostw",
+    "runtimebroker", "shell", "sihost", "spoolsv",
+}
+
+
+def tool_kill_process(name):
+    import psutil
+    name = (name or "").strip()
+    base = name.lower().removesuffix(".exe")
+    if base in _PROTECTED_PROCESSES:
+        return {"error": f"Refusing to kill protected system process: {name}"}
+    killed = []
+    for proc in psutil.process_iter(["name"]):
+        pname = (proc.info["name"] or "").lower()
+        if pname == base or pname == base + ".exe":
+            try:
+                proc.terminate()
+                killed.append(pname)
+            except Exception as e:
+                return {"error": f"Could not kill {name}: {e}"}
+    if not killed:
+        return {"error": f"Process not found: {name}"}
+    return {"killed": killed}
+
+
+def tool_system_action(action):
+    if os.name != "nt":
+        return {"error": "System actions are only supported on Windows."}
+    action = (action or "").strip().lower()
+    cmds = {
+        "shutdown": "shutdown /s /t 10",
+        "restart": "shutdown /r /t 10",
+        "hibernate": "shutdown /h",
+        "logoff": "shutdown /l",
+        "lock": "rundll32.exe user32.dll,LockWorkStation",
+        "sleep": "rundll32.exe powrprof.dll,SetSuspendState 0,1,0",
+    }
+    if action not in cmds:
+        return {"error": f"Unknown system action: {action!r}"}
+    os.system(cmds[action])
+    return {"executed": action}
+
+
 TOOLS = [
     {
         "type": "function",
@@ -276,6 +492,110 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_volume",
+            "description": "Set the master volume to a percentage between 0 and 100.",
+            "parameters": {
+                "type": "object",
+                "properties": {"percent": {"type": "number", "description": "Volume percentage 0-100"}},
+                "required": ["percent"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "adjust_volume",
+            "description": "Adjust volume up, down, mute or unmute.",
+            "parameters": {
+                "type": "object",
+                "properties": {"direction": {"type": "string", "description": "up, down, mute or unmute"}},
+                "required": ["direction"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "media_control",
+            "description": "Control the currently playing media: play/pause, next, previous or stop.",
+            "parameters": {
+                "type": "object",
+                "properties": {"action": {"type": "string", "description": "play/pause, next, previous or stop"}},
+                "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_brightness",
+            "description": "Set the screen brightness to a percentage between 0 and 100.",
+            "parameters": {
+                "type": "object",
+                "properties": {"percent": {"type": "number", "description": "Brightness percentage 0-100"}},
+                "required": ["percent"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "screenshot",
+            "description": "Take a screenshot of the screen and save it to the screenshots folder.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "type_text",
+            "description": "Type text into the currently focused window.",
+            "parameters": {
+                "type": "object",
+                "properties": {"text": {"type": "string", "description": "The text to type"}},
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_folder",
+            "description": "Open a folder or file path in File Explorer.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "The folder or file path to open"}},
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "kill_process",
+            "description": "Terminate a running application by its process name, e.g. notepad or chrome. This is dangerous and requires user approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string", "description": "Process name without .exe, e.g. notepad"}},
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "system_action",
+            "description": "Perform a system action: shutdown, restart, sleep, hibernate, logoff or lock the computer. This is dangerous and requires user approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {"action": {"type": "string", "description": "shutdown, restart, sleep, hibernate, logoff or lock"}},
+                "required": ["action"],
+            },
+        },
+    },
 ]
 
 _TOOL_FUNCS = {
@@ -285,7 +605,62 @@ _TOOL_FUNCS = {
     "web_search": tool_web_search,
     "get_weather": tool_get_weather,
     "create_note": tool_create_note,
+    "set_volume": tool_set_volume,
+    "adjust_volume": tool_adjust_volume,
+    "media_control": tool_media_control,
+    "set_brightness": tool_set_brightness,
+    "screenshot": tool_screenshot,
+    "type_text": tool_type_text,
+    "open_folder": tool_open_folder,
+    "kill_process": tool_kill_process,
+    "system_action": tool_system_action,
 }
+
+# Dangerous tools never run directly — they require explicit user approval.
+DANGEROUS_TOOLS = {"kill_process", "system_action"}
+
+_pending_approvals = {}
+_approval_lock = threading.Lock()
+
+
+def _request_approval(name, args):
+    """Register a dangerous action for later approval and return a needs_approval result."""
+    aid = uuid.uuid4().hex[:8]
+    with _approval_lock:
+        _pending_approvals[aid] = {
+            "name": name,
+            "args": args,
+            "expires": time.time() + 120,
+        }
+    return {
+        "needs_approval": True,
+        "id": aid,
+        "action": name,
+        "args": args,
+        "message": f"Do you want me to run {name}?",
+    }
+
+
+def approve_action(action_id):
+    """Execute a previously requested dangerous action. Returns the result dict."""
+    with _approval_lock:
+        item = _pending_approvals.pop(action_id, None)
+    if not item:
+        return {"error": "Approval expired or not found."}
+    func = _TOOL_FUNCS[item["name"]]
+    try:
+        result = func(**item["args"]) if item["args"] else func()
+    except Exception as e:
+        result = {"error": f"{item['name']} failed: {e}"}
+    print(f"  [approved] {item['name']}({json.dumps(item['args'])}) -> {json.dumps(result)}")
+    return result
+
+
+def deny_action(action_id):
+    """Cancel a previously requested dangerous action."""
+    with _approval_lock:
+        _pending_approvals.pop(action_id, None)
+    return {"denied": True}
 
 
 def run_tool(name, args):
@@ -293,6 +668,8 @@ def run_tool(name, args):
     func = _TOOL_FUNCS.get(name)
     if not func:
         return {"error": f"Unknown tool: {name}"}
+    if name in DANGEROUS_TOOLS:
+        return _request_approval(name, args)
     try:
         result = func(**args) if args else func()
     except Exception as e:
@@ -304,6 +681,15 @@ def run_tool(name, args):
 # ==========================================
 # BRAIN (Ollama with function calling)
 # ==========================================
+class AskResult:
+    """Result of a conversation turn. approval is set when a dangerous action
+    is waiting for the user to confirm or cancel it."""
+
+    def __init__(self, text, approval=None):
+        self.text = text
+        self.approval = approval
+
+
 def _chat(messages, tools):
     kwargs = {"model": OLLAMA_MODEL, "messages": messages}
     if tools:
@@ -312,7 +698,12 @@ def _chat(messages, tools):
 
 
 def ask_ollama(text):
-    """Query the local Ollama LLM, letting it call tools as needed. Raises on failure."""
+    """Query the local Ollama LLM, letting it call tools as needed. Raises on failure.
+
+    Returns an AskResult. If the model requested a dangerous action, result.approval
+    is a dict with keys: id, action, args, message — the caller should ask the user
+    to approve (approve_action) or cancel (deny_action) it.
+    """
     print(f"Querying Ollama model '{OLLAMA_MODEL}'...")
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -320,6 +711,7 @@ def ask_ollama(text):
     ]
     tools = TOOLS
     tool_rounds = 0
+    approval = None
 
     while True:
         try:
@@ -333,7 +725,7 @@ def ask_ollama(text):
             raise
 
         if not response.message.tool_calls:
-            return response.message.content
+            return AskResult(response.message.content, approval=approval)
 
         tool_rounds += 1
         if tool_rounds > 5:
@@ -343,4 +735,7 @@ def ask_ollama(text):
         for call in response.message.tool_calls:
             name = call.function.name
             args = call.function.arguments or {}
-            messages.append({"role": "tool", "content": json.dumps(run_tool(name, args))})
+            result = run_tool(name, args)
+            if result.get("needs_approval"):
+                approval = result
+            messages.append({"role": "tool", "content": json.dumps(result)})

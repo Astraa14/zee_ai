@@ -221,6 +221,18 @@
     
     <div id="log"></div>
 
+    <!-- Approval dialog for dangerous actions -->
+    <div id="approval-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:100; align-items:center; justify-content:center; flex-direction:column;">
+        <div style="border:1px solid rgba(0,242,255,0.5); background:#061316; padding:30px 40px; border-radius:10px; max-width:420px; text-align:center; box-shadow:0 0 30px rgba(0,242,255,0.2);">
+            <h2 style="color:#00f2ff; font-weight:200; letter-spacing:3px; margin-top:0;">AUTHORIZATION REQUIRED</h2>
+            <p id="approval-message" style="color:#fff;"></p>
+            <div style="display:flex; gap:15px; justify-content:center; margin-top:25px;">
+                <button id="approve-btn" style="padding:10px 25px; background:#00f2ff; color:#000; border:none; border-radius:5px; cursor:pointer; font-weight:bold;">APPROVE</button>
+                <button id="deny-btn" style="padding:10px 25px; background:transparent; color:#00f2ff; border:1px solid #00f2ff; border-radius:5px; cursor:pointer;">CANCEL</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         const logDiv = document.getElementById('log');
         const micBtn = document.getElementById('mic-btn');
@@ -251,21 +263,7 @@
             logDiv.scrollTop = logDiv.scrollHeight;
 
             // Send the text to our Python Backend
-            fetch('/ask', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text: text })
-            })
-                .then(response => response.json())
-                .then(data => {
-                    logDiv.innerHTML += `<div class="jarvis-text"><b>JARVIS:</b> ${data.reply}</div>`;
-                    logDiv.scrollTop = logDiv.scrollHeight;
-                    resetUI();
-                })
-                .catch(err => {
-                    logDiv.innerHTML += `<div class="status-text" style="color: red;">Error contacting core.</div>`;
-                    resetUI();
-                });
+            sendAsk(text);
         };
 
         recognition.onerror = function (event) {
@@ -310,23 +308,78 @@
                 logDiv.scrollTop = logDiv.scrollHeight;
 
                 // Send the text to our Python Backend
-                fetch('/ask', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text: text })
-                })
-                    .then(response => response.json())
-                    .then(data => {
-                        logDiv.innerHTML += `<div class="jarvis-text"><b>JARVIS:</b> ${data.reply}</div>`;
-                        logDiv.scrollTop = logDiv.scrollHeight;
-                        resetUI();
-                    })
-                    .catch(err => {
-                        logDiv.innerHTML += `<div class="status-text" style="color: red;">Error contacting core.</div>`;
-                        resetUI();
-                    });
+                sendAsk(text);
             }
         }
+
+        // ==========================================
+        // Shared ask flow (mic + text input)
+        // ==========================================
+        let pendingApprovalId = null;
+
+        function sendAsk(text) {
+            fetch('/ask', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: text })
+            })
+                .then(response => response.json())
+                .then(handleAskResponse)
+                .catch(err => {
+                    logDiv.innerHTML += `<div class="status-text" style="color: red;">Error contacting core.</div>`;
+                    resetUI();
+                });
+        }
+
+        function handleAskResponse(data) {
+            logDiv.innerHTML += `<div class="jarvis-text"><b>JARVIS:</b> ${data.reply}</div>`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+
+            if (data.approval_id) {
+                pendingApprovalId = data.approval_id;
+                document.getElementById('approval-message').textContent =
+                    data.approval_message || 'JARVIS is requesting to take an action on this computer.';
+                document.getElementById('approval-overlay').style.display = 'flex';
+                return;
+            }
+            resetUI();
+        }
+
+        function closeApproval() {
+            document.getElementById('approval-overlay').style.display = 'none';
+            pendingApprovalId = null;
+            resetUI();
+        }
+
+        document.getElementById('approve-btn').addEventListener('click', function () {
+            const id = pendingApprovalId;
+            closeApproval();
+            if (!id) return;
+            fetch('/approve', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ approval_id: id })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    logDiv.innerHTML += `<div class="jarvis-text"><b>JARVIS:</b> ${data.message || 'Done.'}</div>`;
+                    logDiv.scrollTop = logDiv.scrollHeight;
+                })
+                .catch(() => {
+                    logDiv.innerHTML += `<div class="status-text" style="color: red;">Approval failed.</div>`;
+                });
+        });
+
+        document.getElementById('deny-btn').addEventListener('click', function () {
+            const id = pendingApprovalId;
+            closeApproval();
+            if (!id) return;
+            fetch('/deny', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ approval_id: id })
+            });
+        });
 
         // Allow Enter key to send text
         document.getElementById('text-input').addEventListener('keypress', function(e) {

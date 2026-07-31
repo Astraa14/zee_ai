@@ -39,7 +39,25 @@ def open_application(command):
         speak("Opening your browser.")
         os.system("start chrome")
     else:
-        speak("I don't have a path for that application yet.")
+        return False
+    return True
+
+
+def handle_brain(text):
+    """Ask the Ollama brain. Returns a pending approval dict, or None."""
+    try:
+        answer = jarvis_core.ask_ollama(text)
+    except Exception as e:
+        speak("I'm sorry, I am having trouble connecting "
+              "to my cognitive processor.")
+        print(f"Error: {e}")
+        return None
+
+    if answer.approval is not None:
+        speak(answer.text + " Say yes to approve, or no to cancel.")
+        return answer.approval
+    speak(answer.text)
+    return None
 
 
 def audio_callback(indata, frames, time, status):
@@ -61,6 +79,7 @@ def main():
 
     model = vosk.Model("model")
     samplerate = 16000
+    pending_approval = None
 
     with sd.RawInputStream(samplerate=samplerate, blocksize=8000, dtype='int16',
                            channels=1, callback=audio_callback):
@@ -75,23 +94,32 @@ def main():
                 result = json.loads(rec.Result())
                 text = result.get("text", "")
 
-                if text:
-                    print(f"You said: {text}")
+                if not text:
+                    continue
+                print(f"You said: {text}")
 
-                    if "jarvis" in text:
-                        speak("Yes, sir?")
-                    elif "open" in text:
-                        open_application(text)
-                    elif "stop" in text or "exit" in text or "shutdown" in text:
-                        speak("Shutting down. Goodbye.")
-                        break
+                # A dangerous action is awaiting a yes/no answer
+                if pending_approval is not None:
+                    if any(word in text for word in
+                           ("yes", "approve", "ok", "okay", "sure", "go ahead", "do it", "confirm", "allowed")):
+                        jarvis_core.approve_action(pending_approval["id"])
+                        speak("Approved.")
                     else:
-                        try:
-                            speak(jarvis_core.ask_ollama(text))
-                        except Exception as e:
-                            speak("I'm sorry, I am having trouble connecting "
-                                  "to my cognitive processor.")
-                            print(f"Error: {e}")
+                        jarvis_core.deny_action(pending_approval["id"])
+                        speak("Cancelled.")
+                    pending_approval = None
+                    continue
+
+                if "jarvis" in text:
+                    speak("Yes, sir?")
+                elif "open" in text:
+                    if not open_application(text):
+                        pending_approval = handle_brain(text)
+                elif "stop" in text or "exit" in text or "shutdown" in text:
+                    speak("Shutting down. Goodbye.")
+                    break
+                else:
+                    pending_approval = handle_brain(text)
 
 
 if __name__ == "__main__":
