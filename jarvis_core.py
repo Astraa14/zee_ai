@@ -1,9 +1,12 @@
 import asyncio
+import importlib
 import inspect
 import json
+import logging
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -14,6 +17,40 @@ import uuid
 import edge_tts
 import ollama
 import pygame
+
+# ==========================================
+# LOGGING
+# ==========================================
+log = logging.getLogger("jarvis")
+_logging_configured = False
+
+
+def setup_logging():
+    """Configure the 'jarvis' logger once (console + optional file).
+
+    Level from JARVIS_LOG_LEVEL (INFO default); file from JARVIS_LOG_FILE.
+    Safe to call from any module; idempotent.
+    """
+    global _logging_configured
+    if _logging_configured:
+        return
+    _logging_configured = True
+    log.setLevel(os.getenv("JARVIS_LOG_LEVEL", "INFO").upper())
+    fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s", datefmt="%H:%M:%S")
+    console = logging.StreamHandler()
+    console.setFormatter(fmt)
+    log.addHandler(console)
+    logfile = os.getenv("JARVIS_LOG_FILE")
+    if logfile:
+        try:
+            fh = logging.FileHandler(logfile, encoding="utf-8")
+            fh.setFormatter(fmt)
+            log.addHandler(fh)
+        except OSError as e:
+            log.error(f"Cannot open log file {logfile!r}: {e}")
+
+
+setup_logging()
 
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:latest")
 JARVIS_VOICE = os.getenv("JARVIS_VOICE", "en-US-ChristopherNeural")
@@ -41,7 +78,8 @@ SYSTEM_PROMPT = (
 )
 
 # ---------------- MEMORY (conversation history + learned facts) ----------------
-_MEMORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory.json")
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_MEMORY_FILE = os.path.join(_BASE_DIR, "memory.json")
 _memory = {}
 _memory_lock = threading.Lock()
 _history = []  # in-memory conversation turns (user/assistant pairs)
@@ -61,8 +99,8 @@ def _save_memory():
     try:
         with open(_MEMORY_FILE, "w", encoding="utf-8") as f:
             json.dump(_memory, f, indent=2)
-    except OSError:
-        pass
+    except OSError as e:
+        log.warning(f"Could not save memory: {e}")
 
 
 def _extract_facts(text):
@@ -70,7 +108,8 @@ def _extract_facts(text):
     low = (text or "").lower()
     m = re.search(
         r"\b(?:i'?m|i am|i live|i'?m living|i'?m based|am)\s+"
-        r"(?:actually|currently|right now|now|here)?\s*(?:at|in|from|near)\s+"
+        r"(?:actually|currently|right now|now|here|just)?\s*"
+        r"(?:living\s+|based\s+)?(?:at|in|from|near)\s+"
         r"([a-z][a-z .'\-]{0,40}?)\b",
         low,
     )
@@ -137,10 +176,10 @@ def init_audio():
     try:
         _ensure_mixer()
         pygame.mixer.music.set_volume(1.0)
-        print("Audio ready.")
+        log.info("Audio ready.")
         return True
     except Exception as e:
-        print(f"Audio init failed: {e}")
+        log.error(f"Audio init failed: {e}")
         return False
 
 
@@ -162,7 +201,7 @@ def speak(text, wait=False):
     speakers. By default this runs in a background thread; pass wait=True
     to block until playback finishes.
     """
-    print(f"JARVIS: {text}")
+    log.info(f"JARVIS: {text}")
 
     async def generate(path, ready):
         communicate = edge_tts.Communicate(text, JARVIS_VOICE, rate=JARVIS_RATE)
@@ -191,7 +230,7 @@ def speak(text, wait=False):
                 _play_audio_file(path)
             writer.join(timeout=60)
         except Exception as e:
-            print(f"Audio error: {e}")
+            log.error(f"Audio error: {e}")
         finally:
             if os.path.exists(path):
                 try:
@@ -206,30 +245,60 @@ def speak(text, wait=False):
 
 
 # ==========================================
-# HANDS (Tools / Actions)
+# INPUT SANITIZATION + TOOL ARG FILTERING
 # ==========================================
-def _fetch_json(url, timeout=10):
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8", "replace"))
+MAX_ARG_LEN = 1000
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def clean_text(s, maxlen=MAX_ARG_LEN):
+    """Strip control characters and cap the length of untrusted input."""
+    s = "" if s is None else str(s)
+    s = _CONTROL_CHARS_RE.sub("", s)
+    return s[:maxlen].strip()
 
 
 def _filter_args(func, args):
-    """Drop arguments the tool function doesn't accept (models can pass junk)."""
+    """Validate and clean tool arguments: drop unknown keys, unwrap junk
+    dicts, coerce to the declared parameter types, strip control characters
+    and cap lengths."""
     sig = inspect.signature(func)
     cleaned = {}
     for k, v in (args or {}).items():
         if k not in sig.parameters:
             continue
         if isinstance(v, dict) and ({"type", "value", "description"} & set(v.keys())):
+            # Models sometimes wrap the value in {"type": ..., "value": ...}.
             for key in ("value", "description", "type"):
-                if key in v and v[key] not in ("string", "number", "integer", "boolean", "object", "array"):
+                if key in v and v[key] not in ("string", "number", "integer",
+                                               "boolean", "object", "array", "null"):
                     v = v[key]
                     break
             else:
                 v = ""
+        p = sig.parameters[k]
+        if p.annotation is str:
+            v = "" if v is None else str(v)
+            v = clean_text(v)
+        elif isinstance(v, str) and p.annotation in (int, float):
+            # Only accept cleanly convertible strings for numeric params.
+            try:
+                v = int(v) if p.annotation is int else float(v)
+            except ValueError:
+                pass  # keep original; the tool itself will reject it
+        elif isinstance(v, str):
+            v = clean_text(v)
         cleaned[k] = v
     return cleaned
+
+
+# ==========================================
+# HANDS (Tools / Actions) — cross-platform core
+# ==========================================
+def _fetch_json(url, timeout=10):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8", "replace"))
 
 
 def tool_get_time():
@@ -263,213 +332,15 @@ def tool_get_location():
     return {"error": "Location lookup failed."}
 
 
-_KNOWN_APPS = {
-    "notepad": "notepad",
-    "calculator": "calc",
-    "browser": "chrome",
-    "chrome": "chrome",
-    "edge": "msedge",
-    "file explorer": "explorer",
-    "explorer": "explorer",
-    "terminal": "cmd",
-    "command prompt": "cmd",
-    "powershell": "powershell",
-    "visual studio code": "code",
-    "vscode": "code",
-    "paint": "mspaint",
-    "word": "winword",
-    "excel": "excel",
-    "youtube": "https://www.youtube.com",
-    "google": "https://www.google.com",
-    "gmail": "https://mail.google.com",
-    "facebook": "https://www.facebook.com",
-    "instagram": "https://www.instagram.com",
-    "twitter": "https://x.com",
-    "x": "https://x.com",
-    "netflix": "https://www.netflix.com",
-    "spotify": "https://open.spotify.com",
-    "github": "https://github.com",
-    "maps": "https://maps.google.com",
-    "maps google": "https://maps.google.com",
-    "whatsapp": "https://web.whatsapp.com",
-}
-
-_SITE_SUFFIX_RE = re.compile(r"\.(com|net|org|io|tv|me|co|ph|app|ai)$")
-
-_APP_INDEX = None
-
-
-def _build_app_index():
-    """Scan Start Menu + Desktop shortcuts: {lowercase name: .lnk path}."""
-    import glob
-    index = {}
-    dirs = [
-        os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs"),
-        os.path.join(os.environ.get("PROGRAMDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs"),
-        os.path.join(os.environ.get("USERPROFILE", ""), "Desktop"),
-        os.path.join(os.environ.get("PUBLIC", ""), "Desktop"),
-    ]
-    for d in dirs:
-        if not d or not os.path.isdir(d):
-            continue
-        for lnk in glob.glob(os.path.join(d, "**", "*.lnk"), recursive=True):
-            name = os.path.splitext(os.path.basename(lnk))[0].lower()
-            index.setdefault(name, lnk)
-    return index
-
-
-def _resolve_app(app):
-    """Map an app name to a launch target: known apps, installed shortcuts, or the name itself."""
-    target = _KNOWN_APPS.get(app) or _KNOWN_APPS.get(app.replace(" ", ""))
-    if target:
-        return target
-    global _APP_INDEX
-    if _APP_INDEX is None:
-        _APP_INDEX = _build_app_index()
-    hit = _APP_INDEX.get(app) or _APP_INDEX.get(app.replace(" ", ""))
-    if hit:
-        return hit
-    for name in _APP_INDEX:
-        if len(app) >= 5 and (app in name or name in app):
-            return _APP_INDEX[name]
-    return app
-
-
-def tool_open_app(app):
-    if os.name != "nt":
-        return {"error": "App launching is only supported on Windows."}
-    app = (app or "").strip().lower()
-    target = _resolve_app(app)
-    if target.startswith("https://") or target.startswith("http://"):
-        os.system(f'start "" "{target}"')
-        return {"opened_website": target}
-    if target.lower().endswith(".lnk"):
-        os.system(f'start "" "{target}"')
-        return {"opened": target, "via": "installed app"}
-    if re.fullmatch(r"[a-z0-9 ._-]+", target):
-        code = os.system(f"start {target}")
-        return {"opened": target, "command_exit_code": code}
-    if "." in target and not target.startswith(("cmd", "exe", "msi")) or _SITE_SUFFIX_RE.search(target):
-        os.system(f'start "" "https://{target}"')
-        return {"opened_website": f"https://{target}"}
-    return {"error": f"Unsupported application name: {app!r}"}
-
-
-# ---------------- DISCORD (drives the desktop app, like the user typing) ----------------
-# This controls the user's own Discord client via UI automation — no bot, no
-# self-bot API, nothing against Discord's terms. Discord must be running.
-
-
-def _discord_sendkeys(keys):
-    """Activate the Discord window and send keystrokes via WScript.Shell."""
-    safe = keys.replace("'", "''")
-    script = (
-        "$p = Get-Process Discord -ErrorAction SilentlyContinue | "
-        "Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1; "
-        "if (-not $p) { 'notfound' } else { "
-        "$ws = New-Object -ComObject WScript.Shell; "
-        "$ok = $ws.AppActivate($p.Id); "
-        "Start-Sleep -Milliseconds 600; "
-        f"$ws.SendKeys('{safe}'); "
-        "'ok' }"
-    )
+def tool_read_notes():
+    """Read back the last few saved notes."""
+    path = os.path.join(_BASE_DIR, "notes.txt")
     try:
-        out = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", script],
-            capture_output=True, text=True, timeout=20,
-        )
-        return out.stdout.strip()
-    except Exception as e:
-        return f"error: {e}"
-
-
-def _uia_click(button_name):
-    """Click a Discord button by its accessibility name via UI Automation."""
-    script = (
-        "try { Add-Type -AssemblyName UIAutomationClient; "
-        "Add-Type -AssemblyName UIAutomationTypes; "
-        "$root = [System.Windows.Automation.AutomationElement]::RootElement; "
-        "$cond = New-Object System.Windows.Automation.PropertyCondition("
-        "[System.Windows.Automation.AutomationElement]::NameProperty, " +
-        f"'{button_name.replace(chr(39), chr(39) * 2)}'); "
-        "$el = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond); "
-        "if ($el) { $p = $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern); "
-        "$p.Invoke(); 'clicked' } else { 'notfound' } } catch { 'notfound' }"
-    )
-    try:
-        out = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", script],
-            capture_output=True, text=True, timeout=20,
-        )
-        return out.stdout.strip() == "clicked"
-    except Exception:
-        return False
-
-
-def tool_discord_contact(name):
-    """Find a Discord user and open their DM via the quick switcher (Ctrl+K)."""
-    name = (name or "").strip()
-    if not name:
-        return {"error": "No Discord user given."}
-    if _discord_sendkeys("^k") == "notfound":
-        return {"error": "Discord is not running. Start Discord first."}
-    time.sleep(1.2)
-    _discord_sendkeys(name)
-    time.sleep(1.5)
-    _discord_sendkeys("{ENTER}")
-    return {"opened_chat_with": name}
-
-
-def tool_discord_call(name):
-    """Open a DM with a Discord user and start a voice call."""
-    res = tool_discord_contact(name)
-    if "error" in res:
-        return res
-    time.sleep(1.5)
-    if _uia_click("Start Voice Call"):
-        return {"calling": name, "via": "call button"}
-    hotkey = os.getenv("JARVIS_DISCORD_CALL_KEY", "^`")
-    _discord_sendkeys(hotkey)
-    return {"calling": name,
-            "note": "If the call did not start, add the 'Start/Stop Voice Call' "
-                    "keybind in Discord settings and set JARVIS_DISCORD_CALL_KEY."}
-
-
-_DURATION_RE = re.compile(
-    r"(?=\d)"
-    r"(?:(?P<h>\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\s*)?"
-    r"(?:(?P<m>\d+(?:\.\d+)?)\s*(?:minutes?|mins?)\s*)?"
-    r"(?:(?P<s>\d+(?:\.\d+)?)\s*(?:seconds?|secs?))?",
-    re.IGNORECASE,
-)
-
-
-def _duration_to_minutes(duration):
-    """Parse '2 minutes', '1 hour 30 minutes', '45 seconds' into minutes."""
-    d = (duration or "").strip().lower()
-    m = _DURATION_RE.search(d)
-    if m and any(m.group(k) for k in ("h", "m", "s")):
-        hours = float(m.group("h") or 0)
-        mins = float(m.group("m") or 0)
-        secs = float(m.group("s") or 0)
-        return hours * 60 + mins + secs / 60
-    try:
-        return float(d)  # bare number = minutes
-    except ValueError:
-        return None
-
-
-def tool_set_reminder(duration, message=None):
-    """Speak a reminder after the given duration (e.g. '2 minutes')."""
-    minutes = _duration_to_minutes(duration)
-    if minutes is None or minutes <= 0:
-        return {"error": f"Could not understand the duration: {duration!r}"}
-    msg = (message or "Your reminder is due.").strip()
-    def fire():
-        time.sleep(minutes * 60)
-        speak(f"Reminder: {msg}")
-    threading.Thread(target=fire, daemon=True).start()
-    return {"reminder_set_for_minutes": minutes, "message": msg}
+        with open(path, encoding="utf-8") as f:
+            lines = [l for l in f.read().splitlines() if l.strip()]
+    except OSError:
+        return {"notes": []}
+    return {"notes": lines[-10:]}
 
 
 def tool_list_processes():
@@ -486,51 +357,41 @@ def tool_list_processes():
     return {"running_apps": top, "total_processes": len(procs)}
 
 
-_FILE_SEARCH_DIRS = ["Documents", "Downloads", "Desktop", "Pictures"]
+_DURATION_RE = re.compile(
+    r"(?=\d)"
+    r"(?:(?P<h>\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\s*)?"
+    r"(?:(?P<m>\d+(?:\.\d+)?)\s*(?:minutes?|mins?)\s*)?"
+    r"(?:(?P<s>\d+(?:\.\d+)?)\s*(?:seconds?|secs?))?",
+    re.IGNORECASE,
+)
 
 
-def tool_open_file(name):
-    """Find a file by name in the usual folders and open it."""
-    name = (name or "").strip()
-    if not name:
-        return {"error": "No file name given."}
-    name = name.lower()
-    bases = [os.path.expanduser("~")]
-    for key in _FILE_SEARCH_DIRS:
-        d = os.path.join(os.path.expanduser("~"), key)
-        if os.path.isdir(d):
-            bases.append(d)
-    scanned = 0
-    for base in bases:
-        for root, dirs, files in os.walk(base):
-            dirs[:] = dirs[:25]
-            for f in files[:300]:
-                scanned += 1
-                if scanned > 5000:
-                    break
-                if name in f.lower():
-                    full = os.path.join(root, f)
-                    try:
-                        os.startfile(full)
-                    except OSError as e:
-                        return {"error": f"Could not open {full}: {e}"}
-                    return {"opened_file": full}
-            if scanned > 5000:
-                break
-        if scanned > 5000:
-            break
-    return {"error": f"No file matching {name!r} found in Documents, Downloads, Desktop or Pictures."}
-
-
-def tool_read_notes():
-    """Read back the last few saved notes."""
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notes.txt")
+def _duration_to_minutes(duration):
+    """Parse '2 minutes', '1 hour 30 minutes', '45 seconds' into minutes."""
+    d = clean_text(duration).lower()
+    m = _DURATION_RE.search(d)
+    if m and any(m.group(k) for k in ("h", "m", "s")):
+        hours = float(m.group("h") or 0)
+        mins = float(m.group("m") or 0)
+        secs = float(m.group("s") or 0)
+        return hours * 60 + mins + secs / 60
     try:
-        with open(path, encoding="utf-8") as f:
-            lines = [l for l in f.read().splitlines() if l.strip()]
-    except OSError:
-        return {"notes": []}
-    return {"notes": lines[-10:]}
+        return float(d)  # bare number = minutes
+    except ValueError:
+        return None
+
+
+def tool_set_reminder(duration: str, message: str = None):
+    """Speak a reminder after the given duration (e.g. '2 minutes')."""
+    minutes = _duration_to_minutes(duration)
+    if minutes is None or minutes <= 0:
+        return {"error": f"Could not understand the duration: {duration!r}"}
+    msg = clean_text(message or "Your reminder is due.", 500)
+    def fire():
+        time.sleep(minutes * 60)
+        speak(f"Reminder: {msg}")
+    threading.Thread(target=fire, daemon=True).start()
+    return {"reminder_set_for_minutes": minutes, "message": msg}
 
 
 def tool_system_info():
@@ -548,7 +409,10 @@ def tool_system_info():
     return info
 
 
-def tool_web_search(query):
+def tool_web_search(query: str):
+    query = clean_text(query, 300)
+    if not query:
+        return {"error": "No search query given."}
     params = urllib.parse.urlencode({
         "action": "query",
         "list": "search",
@@ -585,8 +449,8 @@ _WMO_CODES = {
 }
 
 
-def tool_get_weather(city):
-    city = (city or "").strip()
+def tool_get_weather(city: str):
+    city = clean_text(city, 100)
     if not city:
         return {"error": "No city provided."}
     try:
@@ -617,8 +481,11 @@ def tool_get_weather(city):
     }
 
 
-def tool_create_note(content):
-    notes_file = os.path.join(os.getcwd(), "notes.txt")
+def tool_create_note(content: str):
+    content = clean_text(content, 2000)
+    if not content:
+        return {"error": "No note content given."}
+    notes_file = os.path.join(_BASE_DIR, "notes.txt")
     from datetime import datetime
     with open(notes_file, "a", encoding="utf-8") as f:
         f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M')}] {content}\n")
@@ -626,219 +493,174 @@ def tool_create_note(content):
 
 
 # ==========================================
-# HANDS (PC Control)
+# HANDS (PC Control) — Windows-only module
 # ==========================================
-def _press_vk(vk):
-    """Press and release a virtual-key code using keybd_event."""
-    import ctypes
-    ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
-    ctypes.windll.user32.keybd_event(vk, 0, 2, 0)
+try:
+    import win_control
+    log.debug("win_control loaded")
+except ImportError as e:
+    win_control = None
+    log.warning(f"win_control not available: {e}")
+
+KNOWN_APP_NAMES = set(getattr(win_control, "KNOWN_APP_NAMES", ()))
 
 
-def _type_unicode(text):
-    """Type arbitrary text into the focused window via SendInput (KEYEVENTF_UNICODE)."""
-    import ctypes
-    from ctypes import wintypes
+# ==========================================
+# APPROVAL / AUDIT (dangerous actions)
+# ==========================================
+DANGEROUS_TOOLS = {"kill_process", "system_action"}
 
-    KEYEVENTF_KEYUP = 0x0002
-    KEYEVENTF_UNICODE = 0x0004
-    INPUT_KEYBOARD = 1
+_APPROVAL_FILE = os.path.join(_BASE_DIR, "pending_approvals.json")
+_AUDIT_DIR = os.path.join(_BASE_DIR, "audit")
+_APPROVAL_TTL = int(os.getenv("JARVIS_APPROVAL_TTL", "120"))
 
-    class KEYBDINPUT(ctypes.Structure):
-        _fields_ = [
-            ("wVk", wintypes.WORD),
-            ("wScan", wintypes.WORD),
-            ("dwFlags", wintypes.DWORD),
-            ("time", wintypes.DWORD),
-            ("dwExtraInfo", ctypes.c_void_p),
-        ]
-
-    class _INPUT_UNION(ctypes.Union):
-        _fields_ = [("ki", KEYBDINPUT)]
-
-    class INPUT(ctypes.Structure):
-        _fields_ = [("type", wintypes.DWORD), ("u", _INPUT_UNION)]
-
-    def _input(ch, up):
-        ki = KEYBDINPUT()
-        ki.wScan = ord(ch)
-        ki.dwFlags = KEYEVENTF_UNICODE | (KEYEVENTF_KEYUP if up else 0)
-        return INPUT(type=INPUT_KEYBOARD, u=_INPUT_UNION(ki=ki))
-
-    for ch in text:
-        for up in (False, True):
-            ctypes.windll.user32.SendInput(1, ctypes.byref(_input(ch, up)), ctypes.sizeof(INPUT))
+_pending_approvals = {}
+_approval_lock = threading.Lock()
 
 
-def _endpoint_volume():
-    from pycaw.pycaw import AudioUtilities
-    return AudioUtilities.GetSpeakers().EndpointVolume
-
-
-def tool_set_volume(percent):
-    if os.name != "nt":
-        return {"error": "Volume control is only supported on Windows."}
+def _audit(event, **fields):
+    """Append one line to the append-only approval audit log."""
     try:
-        pct = float(percent)
-    except (TypeError, ValueError):
-        return {"error": f"Invalid volume: {percent!r}"}
-    pct = max(0, min(100, pct))
+        os.makedirs(_AUDIT_DIR, exist_ok=True)
+        entry = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "event": event}
+        entry.update(fields)
+        with open(os.path.join(_AUDIT_DIR, "approvals.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as e:
+        log.warning(f"Could not write audit log: {e}")
+
+
+def _load_pending_approvals():
+    """Restore pending approvals from disk (survives restarts)."""
+    global _pending_approvals
     try:
-        _endpoint_volume().SetMasterVolumeLevelScalar(pct / 100, None)
-    except Exception as e:
-        return {"error": f"set_volume failed: {e}"}
-    return {"volume_percent": pct}
+        with open(_APPROVAL_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return
+        for aid, item in data.items():
+            if isinstance(item, dict) and "name" in item and "args" in item:
+                try:
+                    item["expires"] = float(item.get("expires", 0))
+                except (TypeError, ValueError):
+                    item["expires"] = 0.0
+                _pending_approvals[aid] = item
+    except OSError:
+        pass
+    except ValueError as e:
+        log.warning(f"Corrupt approval file {_APPROVAL_FILE}: {e}")
 
 
-def tool_adjust_volume(direction):
-    if os.name != "nt":
-        return {"error": "Volume control is only supported on Windows."}
-    direction = (direction or "").strip().lower()
+def _save_pending_approvals():
     try:
-        if direction == "mute":
-            _endpoint_volume().SetMute(1, None)
-            return {"adjusted": "mute"}
-        if direction == "unmute":
-            _endpoint_volume().SetMute(0, None)
-            return {"adjusted": "unmute"}
-        if direction == "up":
-            _press_vk(0xAF)  # VK_VOLUME_UP
-            return {"adjusted": "up"}
-        if direction == "down":
-            _press_vk(0xAE)  # VK_VOLUME_DOWN
-            return {"adjusted": "down"}
-        return {"error": f"Unknown direction: {direction!r}. Use up, down, mute or unmute."}
-    except Exception as e:
-        return {"error": f"adjust_volume failed: {e}"}
+        with _approval_lock:
+            data = json.dumps(_pending_approvals, ensure_ascii=False)
+        tmp = _APPROVAL_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(data)
+        os.replace(tmp, _APPROVAL_FILE)
+    except OSError as e:
+        log.warning(f"Could not save pending approvals: {e}")
 
 
-_MEDIA_KEYS = {
-    "play/pause": 0xB3,
-    "playpause": 0xB3,
-    "play": 0xB3,
-    "pause": 0xB3,
-    "next": 0xB0,
-    "next track": 0xB0,
-    "previous": 0xB1,
-    "previous track": 0xB1,
-    "prev": 0xB1,
-    "stop": 0xB2,
-}
-
-
-def tool_media_control(action):
-    if os.name != "nt":
-        return {"error": "Media control is only supported on Windows."}
-    key = _MEDIA_KEYS.get((action or "").strip().lower())
-    if key is None:
-        return {"error": f"Unknown media action: {action!r}. Use play/pause, next, previous or stop."}
-    _press_vk(key)
-    return {"action": (action or "").strip().lower()}
-
-
-def tool_set_brightness(percent):
-    if os.name != "nt":
-        return {"error": "Brightness control is only supported on Windows."}
-    try:
-        pct = int(percent)
-    except (TypeError, ValueError):
-        return {"error": f"Invalid brightness: {percent!r}"}
-    pct = max(0, min(100, pct))
-    cmd = ["powershell", "-NoProfile", "-Command",
-           f"(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1,{pct})"]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-    except Exception as e:
-        return {"error": f"set_brightness failed: {e}"}
-    if result.returncode != 0:
-        return {"error": "Brightness not supported on this system."}
-    return {"brightness_percent": pct}
-
-
-def tool_screenshot():
-    from datetime import datetime
-    from PIL import ImageGrab
-    folder = os.path.join(os.getcwd(), "screenshots")
-    os.makedirs(folder, exist_ok=True)
-    path = os.path.join(folder, f"screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
-    try:
-        ImageGrab.grab().save(path)
-    except Exception as e:
-        return {"error": f"screenshot failed: {e}"}
-    return {"saved_to": path}
-
-
-def tool_type_text(text):
-    if os.name != "nt":
-        return {"error": "Typing is only supported on Windows."}
-    text = text or ""
-    if not text:
-        return {"error": "No text to type."}
-    try:
-        _type_unicode(text)
-    except Exception as e:
-        return {"error": f"type_text failed: {e}"}
-    return {"typed_chars": len(text)}
-
-
-def tool_open_folder(path):
-    if os.name != "nt":
-        return {"error": "Opening folders is only supported on Windows."}
-    path = (path or "").strip().strip('"')
-    if not path:
-        return {"error": "No path provided."}
-    if not os.path.exists(path):
-        return {"error": f"Path not found: {path}"}
-    os.startfile(path)
-    return {"opened": path}
-
-
-_PROTECTED_PROCESSES = {
-    "system", "registry", "wininit", "winlogon", "csrss", "smss", "services",
-    "lsass", "explorer", "svchost", "dwm", "taskhost", "taskhostw",
-    "runtimebroker", "shell", "sihost", "spoolsv",
-}
-
-
-def tool_kill_process(name):
-    import psutil
-    name = (name or "").strip()
-    base = name.lower().removesuffix(".exe")
-    if base in _PROTECTED_PROCESSES:
-        return {"error": f"Refusing to kill protected system process: {name}"}
-    killed = []
-    for proc in psutil.process_iter(["name"]):
-        pname = (proc.info["name"] or "").lower()
-        if pname == base or pname == base + ".exe":
-            try:
-                proc.terminate()
-                killed.append(pname)
-            except Exception as e:
-                return {"error": f"Could not kill {name}: {e}"}
-    if not killed:
-        return {"error": f"Process not found: {name}"}
-    return {"killed": killed}
-
-
-def tool_system_action(action):
-    if os.name != "nt":
-        return {"error": "System actions are only supported on Windows."}
-    action = (action or "").strip().lower()
-    cmds = {
-        "shutdown": "shutdown /s /t 10",
-        "restart": "shutdown /r /t 10",
-        "hibernate": "shutdown /h",
-        "logoff": "shutdown /l",
-        "lock": "rundll32.exe user32.dll,LockWorkStation",
-        "sleep": "rundll32.exe powrprof.dll,SetSuspendState 0,1,0",
+def request_approval(name, args):
+    """Register a dangerous action for later approval and return a needs_approval result."""
+    aid = uuid.uuid4().hex[:16]
+    now = time.time()
+    with _approval_lock:
+        for old_id, old in list(_pending_approvals.items()):
+            if old.get("expires", 0) < now:
+                _pending_approvals.pop(old_id, None)
+                _audit("expired", id=old_id, action=old.get("name"),
+                       args=json.dumps(old.get("args")))
+        _pending_approvals[aid] = {
+            "name": name,
+            "args": args,
+            "expires": now + _APPROVAL_TTL,
+        }
+    _save_pending_approvals()
+    _audit("requested", id=aid, action=name, args=json.dumps(args))
+    log.warning(f"Approval requested: {name}({json.dumps(args)}) [id={aid}]")
+    return {
+        "needs_approval": True,
+        "id": aid,
+        "action": name,
+        "args": args,
+        "message": f"Do you want me to run {name}?",
     }
-    if action not in cmds:
-        return {"error": f"Unknown system action: {action!r}"}
-    os.system(cmds[action])
-    return {"executed": action}
 
 
-TOOLS = [
+def maybe_request_approval(user_text):
+    """Safety net: if the user asked for a dangerous action but the model didn't
+    call a tool, register the approval anyway so the flow always works."""
+    t = (user_text or "").lower()
+    if re.search(r"\b(shut\s?down|power\s?off|turn\s?off)\b.*\b(computer|pc|machine|laptop|system)\b", t) or \
+       re.fullmatch(r"\s*(shut\s?down|power\s?off)\s*[.!]*\s*", t):
+        return request_approval("system_action", {"action": "shutdown"})
+    if re.search(r"\b(restart|reboot)\b", t):
+        return request_approval("system_action", {"action": "restart"})
+    if re.search(r"\b(hibernate|sleep)\b.*\b(computer|pc|system|laptop)\b", t):
+        return request_approval("system_action", {"action": "sleep"})
+    if re.search(r"\blog\s?off\b|\bsign\s?out\b", t):
+        return request_approval("system_action", {"action": "logoff"})
+    if re.search(r"\block\b.*\b(computer|pc|screen)\b", t):
+        return request_approval("system_action", {"action": "lock"})
+    m = re.search(r"\b(kill|close|terminate|stop)\s+(?:the\s+)?([a-z][a-z0-9 ._-]{1,24})", t)
+    if m:
+        name = m.group(2).split()[0].removesuffix(".exe")
+        if name in KNOWN_APP_NAMES or name.endswith("app") or name.endswith("application") or name.endswith("browser"):
+            return request_approval("kill_process", {"name": name})
+    return None
+
+
+def approve_action(action_id):
+    """Execute a previously requested dangerous action. Returns the result dict."""
+    with _approval_lock:
+        item = _pending_approvals.pop(action_id, None)
+    if item is None:
+        _save_pending_approvals()
+        _audit("approve_missing", id=action_id)
+        return {"error": "Approval expired or not found."}
+    if item.get("expires", 0) < time.time():
+        _save_pending_approvals()
+        _audit("expired", id=action_id, action=item.get("name"),
+               args=json.dumps(item.get("args")))
+        return {"error": "Approval expired."}
+    _save_pending_approvals()
+    func = _TOOL_FUNCS.get(item["name"])
+    if not func:
+        _audit("approve_failed", id=action_id, action=item.get("name"),
+               reason="unknown tool")
+        return {"error": f"Unknown tool: {item['name']}"}
+    try:
+        result = func(**_filter_args(func, item["args"])) if item["args"] else func()
+    except Exception as e:
+        result = {"error": f"{item['name']} failed: {e}"}
+    _audit("approved", id=action_id, action=item["name"],
+           args=json.dumps(item["args"]), result=json.dumps(result))
+    log.info(f"[approved] {item['name']}({json.dumps(item['args'])}) -> {json.dumps(result)}")
+    return result
+
+
+def deny_action(action_id):
+    """Cancel a previously requested dangerous action."""
+    with _approval_lock:
+        item = _pending_approvals.pop(action_id, None)
+    if item is not None:
+        _save_pending_approvals()
+        _audit("denied", id=action_id, action=item.get("name"),
+               args=json.dumps(item.get("args")))
+        log.info(f"[denied] {item.get('name')}({json.dumps(item.get('args'))}) [id={action_id}]")
+    return {"denied": True}
+
+
+_load_pending_approvals()
+
+
+# ==========================================
+# TOOLS registry + dispatcher
+# ==========================================
+_CORE_TOOLS = [
     {
         "type": "function",
         "function": {
@@ -853,30 +675,6 @@ TOOLS = [
             "name": "get_location",
             "description": "Get the approximate city and country location of this computer (IP geolocation).",
             "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "open_app",
-            "description": "Open a desktop application (e.g. notepad, calculator, browser, paint, terminal) or a website (e.g. youtube, google, gmail, facebook, netflix).",
-            "parameters": {
-                "type": "object",
-                "properties": {"app": {"type": "string", "description": "Name of the application to open"}},
-                "required": ["app"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "open_file",
-            "description": "Find a file by name in Documents, Downloads, Desktop or Pictures and open it (e.g. resume.pdf).",
-            "parameters": {
-                "type": "object",
-                "properties": {"name": {"type": "string", "description": "File name or part of it"}},
-                "required": ["name"],
-            },
         },
     },
     {
@@ -907,30 +705,6 @@ TOOLS = [
                     "message": {"type": "string", "description": "What to remind about"},
                 },
                 "required": ["duration"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "discord_contact",
-            "description": "Find a Discord user and open their direct message chat. Requires the Discord desktop app to be running.",
-            "parameters": {
-                "type": "object",
-                "properties": {"name": {"type": "string", "description": "The Discord username to find"}},
-                "required": ["name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "discord_call",
-            "description": "Find a Discord user and start a voice call with them. Requires the Discord desktop app to be running.",
-            "parameters": {
-                "type": "object",
-                "properties": {"name": {"type": "string", "description": "The Discord username to call"}},
-                "required": ["name"],
             },
         },
     },
@@ -978,205 +752,25 @@ TOOLS = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_volume",
-            "description": "Set the master volume to a percentage between 0 and 100.",
-            "parameters": {
-                "type": "object",
-                "properties": {"percent": {"type": "number", "description": "Volume percentage 0-100"}},
-                "required": ["percent"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "adjust_volume",
-            "description": "Adjust volume up, down, mute or unmute.",
-            "parameters": {
-                "type": "object",
-                "properties": {"direction": {"type": "string", "description": "up, down, mute or unmute"}},
-                "required": ["direction"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "media_control",
-            "description": "Control the currently playing media: play/pause, next, previous or stop.",
-            "parameters": {
-                "type": "object",
-                "properties": {"action": {"type": "string", "description": "play/pause, next, previous or stop"}},
-                "required": ["action"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_brightness",
-            "description": "Set the screen brightness to a percentage between 0 and 100.",
-            "parameters": {
-                "type": "object",
-                "properties": {"percent": {"type": "number", "description": "Brightness percentage 0-100"}},
-                "required": ["percent"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "screenshot",
-            "description": "Take a screenshot of the screen and save it to the screenshots folder.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "type_text",
-            "description": "Type text into the currently focused window.",
-            "parameters": {
-                "type": "object",
-                "properties": {"text": {"type": "string", "description": "The text to type"}},
-                "required": ["text"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "open_folder",
-            "description": "Open a folder or file path in File Explorer.",
-            "parameters": {
-                "type": "object",
-                "properties": {"path": {"type": "string", "description": "The folder or file path to open"}},
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "kill_process",
-            "description": "Terminate a running application by its process name, e.g. notepad or chrome. This is dangerous and requires user approval.",
-            "parameters": {
-                "type": "object",
-                "properties": {"name": {"type": "string", "description": "Process name without .exe, e.g. notepad"}},
-                "required": ["name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "system_action",
-            "description": "Perform a system action: shutdown, restart, sleep, hibernate, logoff or lock the computer. This is dangerous and requires user approval.",
-            "parameters": {
-                "type": "object",
-                "properties": {"action": {"type": "string", "description": "shutdown, restart, sleep, hibernate, logoff or lock"}},
-                "required": ["action"],
-            },
-        },
-    },
 ]
 
-_TOOL_FUNCS = {
+_CORE_TOOL_FUNCS = {
     "get_time": tool_get_time,
     "get_location": tool_get_location,
-    "open_app": tool_open_app,
-    "open_file": tool_open_file,
     "read_notes": tool_read_notes,
     "list_processes": tool_list_processes,
     "set_reminder": tool_set_reminder,
-    "discord_contact": tool_discord_contact,
-    "discord_call": tool_discord_call,
     "system_info": tool_system_info,
     "web_search": tool_web_search,
     "get_weather": tool_get_weather,
     "create_note": tool_create_note,
-    "set_volume": tool_set_volume,
-    "adjust_volume": tool_adjust_volume,
-    "media_control": tool_media_control,
-    "set_brightness": tool_set_brightness,
-    "screenshot": tool_screenshot,
-    "type_text": tool_type_text,
-    "open_folder": tool_open_folder,
-    "kill_process": tool_kill_process,
-    "system_action": tool_system_action,
 }
 
-# Dangerous tools never run directly — they require explicit user approval.
-DANGEROUS_TOOLS = {"kill_process", "system_action"}
+if win_control is not None:
+    _CORE_TOOL_FUNCS.update(win_control.WIN_TOOL_FUNCS)
 
-_pending_approvals = {}
-_approval_lock = threading.Lock()
-
-
-def request_approval(name, args):
-    """Register a dangerous action for later approval and return a needs_approval result."""
-    aid = uuid.uuid4().hex[:8]
-    with _approval_lock:
-        _pending_approvals[aid] = {
-            "name": name,
-            "args": args,
-            "expires": time.time() + 120,
-        }
-    return {
-        "needs_approval": True,
-        "id": aid,
-        "action": name,
-        "args": args,
-        "message": f"Do you want me to run {name}?",
-    }
-
-
-def maybe_request_approval(user_text):
-    """Safety net: if the user asked for a dangerous action but the model didn't
-    call a tool, register the approval anyway so the flow always works."""
-    t = (user_text or "").lower()
-    if re.search(r"\b(shut\s?down|power\s?off|turn\s?off)\b.*\b(computer|pc|machine|laptop|system)\b", t) or \
-       re.fullmatch(r"\s*(shut\s?down|power\s?off)\s*[.!]*\s*", t):
-        return request_approval("system_action", {"action": "shutdown"})
-    if re.search(r"\b(restart|reboot)\b", t):
-        return request_approval("system_action", {"action": "restart"})
-    if re.search(r"\b(hibernate|sleep)\b.*\b(computer|pc|system|laptop)\b", t):
-        return request_approval("system_action", {"action": "sleep"})
-    if re.search(r"\blog\s?off\b|\bsign\s?out\b", t):
-        return request_approval("system_action", {"action": "logoff"})
-    if re.search(r"\block\b.*\b(computer|pc|screen)\b", t):
-        return request_approval("system_action", {"action": "lock"})
-    m = re.search(r"\b(kill|close|terminate|stop)\s+(?:the\s+)?([a-z][a-z0-9 ._-]{1,24})", t)
-    if m:
-        name = m.group(2).split()[0].removesuffix(".exe")
-        if name in _KNOWN_APPS or name.endswith("app") or name.endswith("application") or name.endswith("browser"):
-            return request_approval("kill_process", {"name": name})
-    return None
-
-
-def approve_action(action_id):
-    """Execute a previously requested dangerous action. Returns the result dict."""
-    with _approval_lock:
-        item = _pending_approvals.pop(action_id, None)
-    if not item:
-        return {"error": "Approval expired or not found."}
-    func = _TOOL_FUNCS[item["name"]]
-    try:
-        result = func(**_filter_args(func, item["args"])) if item["args"] else func()
-    except Exception as e:
-        result = {"error": f"{item['name']} failed: {e}"}
-    print(f"  [approved] {item['name']}({json.dumps(item['args'])}) -> {json.dumps(result)}")
-    return result
-
-
-def deny_action(action_id):
-    """Cancel a previously requested dangerous action."""
-    with _approval_lock:
-        _pending_approvals.pop(action_id, None)
-    return {"denied": True}
+_TOOL_FUNCS = _CORE_TOOL_FUNCS
+TOOLS = _CORE_TOOLS + (win_control.WIN_TOOLS if win_control is not None else [])
 
 
 def run_tool(name, args):
@@ -1190,7 +784,7 @@ def run_tool(name, args):
         result = func(**_filter_args(func, args)) if args else func()
     except Exception as e:
         result = {"error": f"{name} failed: {e}"}
-    print(f"  [tool] {name}({json.dumps(args)}) -> {json.dumps(result)}")
+    log.info(f"[tool] {name}({json.dumps(args)}) -> {json.dumps(result)}")
     return result
 
 
@@ -1228,9 +822,9 @@ def warmup_model():
     """Preload the model so the first request isn't slow. Call in a thread."""
     try:
         _chat([{"role": "user", "content": "hi"}], tools=None)
-        print(f"Model '{OLLAMA_MODEL}' warmed up.")
+        log.info(f"Model '{OLLAMA_MODEL}' warmed up.")
     except Exception as e:
-        print(f"Warmup failed (will retry on first request): {e}")
+        log.warning(f"Warmup failed (will retry on first request): {e}")
 
 
 def _parse_inline_tool_call(content):
@@ -1323,7 +917,7 @@ def ask_ollama(text):
     is a dict with keys: id, action, args, message — the caller should ask the user
     to approve (approve_action) or cancel (deny_action) it.
     """
-    print(f"Querying Ollama model '{OLLAMA_MODEL}'...")
+    log.info(f"Querying Ollama model '{OLLAMA_MODEL}'...")
     _extract_facts(text)
     quick = _quick_reply(text)
     if quick:
@@ -1345,7 +939,7 @@ def ask_ollama(text):
         except Exception as e:
             if tools:
                 # Model probably doesn't support function calling — retry without tools.
-                print(f"Tool calling failed ({e}); retrying without tools.")
+                log.warning(f"Tool calling failed ({e}); retrying without tools.")
                 tools = None
                 continue
             raise
@@ -1413,7 +1007,7 @@ class StreamAsk:
 
 
 def _ask_stream(sa):
-    print(f"Querying Ollama model '{OLLAMA_MODEL}'...")
+    log.info(f"Querying Ollama model '{OLLAMA_MODEL}'...")
     _extract_facts(sa._text)
     quick = _quick_reply(sa._text)
     if quick:
@@ -1436,7 +1030,7 @@ def _ask_stream(sa):
         except Exception as e:
             if tools:
                 # Model probably doesn't support function calling — retry without tools.
-                print(f"Tool calling failed ({e}); retrying without tools.")
+                log.warning(f"Tool calling failed ({e}); retrying without tools.")
                 tools = None
                 continue
             raise
@@ -1505,3 +1099,112 @@ def _ask_stream(sa):
             if result.get("needs_approval"):
                 sa.approval = result
             messages.append({"role": "tool", "content": json.dumps(result)})
+
+
+# ==========================================
+# ENVIRONMENT DIAGNOSTICS
+# ==========================================
+_CRITICAL_DEPS = {
+    "ollama": "ollama",
+    "edge_tts": "edge_tts",
+    "pygame": "pygame",
+}
+_OPTIONAL_DEPS = {
+    "psutil": "psutil",
+    "flask": "flask",
+    "vosk": "vosk",
+    "sounddevice": "sounddevice",
+    "Pillow": "PIL",
+    "cryptography": "cryptography",
+}
+
+
+def check_ollama():
+    """True if the Ollama server answers on the local API."""
+    try:
+        ollama.list()
+        return True
+    except Exception:
+        return False
+
+
+def doctor():
+    """Diagnose the environment: platform, dependencies, Ollama, model, audio.
+
+    Never raises. Returns a dict report; use --doctor on the CLI for a
+    human-readable summary with a nonzero exit code when critical pieces
+    are missing.
+    """
+    import platform as _platform
+    rep = {
+        "platform": {
+            "system": _platform.system(),
+            "release": _platform.release(),
+            "machine": _platform.machine(),
+            "python": sys.version.split()[0],
+        },
+    }
+    deps = {}
+    for label, mod in {**_CRITICAL_DEPS, **_OPTIONAL_DEPS}.items():
+        try:
+            importlib.import_module(mod)
+            deps[label] = "ok"
+        except ImportError as e:
+            deps[label] = f"MISSING: {e}"
+    if os.name == "nt":
+        try:
+            importlib.import_module("pycaw")
+            deps["pycaw"] = "ok"
+        except ImportError as e:
+            deps["pycaw"] = f"MISSING: {e}"
+    rep["dependencies"] = deps
+
+    if check_ollama():
+        rep["ollama"] = "ok"
+        try:
+            ollama.show(OLLAMA_MODEL)
+            rep["model"] = "ok"
+        except Exception as e:
+            rep["model"] = f"ERROR: {e} (pull it with: ollama pull {OLLAMA_MODEL})"
+    else:
+        rep["ollama"] = "ERROR: Ollama server unreachable (start 'ollama serve')"
+        rep["model"] = "skipped (Ollama unreachable)"
+
+    if init_audio():
+        rep["audio"] = "ok"
+    else:
+        rep["audio"] = "ERROR: audio device unavailable (TTS playback disabled)"
+
+    model_dir = os.path.join(os.getcwd(), "model")
+    rep["vosk_model"] = ("ok" if os.path.isdir(model_dir)
+                         else "missing (only needed for jarvis.py voice loop)")
+
+    critical_ok = (
+        all(v == "ok" for k, v in deps.items() if k in _CRITICAL_DEPS)
+        and rep.get("ollama") == "ok"
+        and rep.get("model") == "ok"
+    )
+    rep["healthy"] = critical_ok
+    return rep
+
+
+def doctor_summary(rep):
+    """Format a doctor() report for console output."""
+    lines = [f"Platform: {rep['platform']['system']} ({rep['platform']['machine']}), "
+             f"Python {rep['platform']['python']}"]
+    for label in sorted(rep["dependencies"]):
+        lines.append(f"  dep  {label:15} {rep['dependencies'][label]}")
+    lines.append(f"  ollama        {rep.get('ollama')}")
+    lines.append(f"  model         {rep.get('model')}")
+    lines.append(f"  audio         {rep.get('audio')}")
+    lines.append(f"  vosk model    {rep.get('vosk_model')}")
+    return lines
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--doctor":
+        report = doctor()
+        for line in doctor_summary(report):
+            print(line)
+        print("HEALTHY" if report["healthy"] else "PROBLEMS DETECTED")
+        sys.exit(0 if report["healthy"] else 1)

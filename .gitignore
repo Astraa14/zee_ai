@@ -9,3 +9,8 @@ screenshots/
 cert.pem
 key.pem
 memory.json
+pending_approvals.json
+audit/
+.jarvis_token
+jarvis.log
+.pytest_cache/

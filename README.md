@@ -99,6 +99,28 @@ Chrome only allows microphone access on secure origins (`https://` or
 warning, an old server instance is still running — stop it (or use
 `start_jarvis.bat`, which handles that automatically).
 
+### Authentication (web UI)
+
+The web API is protected with a **Bearer token** when exposed on the LAN:
+
+- Set `JARVIS_TOKEN=your-secret-token` before starting, **or** let JARVIS
+  generate one (saved to `.jarvis_token`, shown in the server console).
+- The browser UI asks for the token once and stores it locally
+  (`?token=YOUR_TOKEN` in the URL also works).
+- All POST endpoints (`/ask`, `/approve`, `/deny`) return `401` without it.
+- To disable auth (localhost only), set `JARVIS_TOKEN=none`.
+
+Rate limiting: `/ask` allows `JARVIS_RATE_LIMIT` requests/minute per client
+IP (default 30) and request bodies are capped at `JARVIS_MAX_BODY_KB` (default
+16 KB). Oversized requests get `413`, rate-limited ones get `429`.
+
+### Diagnostics
+
+`python jarvis_core.py --doctor` prints a health report (dependencies,
+Ollama + model availability, audio, Vosk model) and exits nonzero when
+critical pieces are missing. `app.py` and `jarvis.py` log the same report
+at startup.
+
 ### Desktop voice loop
 
 ```sh
@@ -139,8 +161,13 @@ internet connection.
 
 ## PC control
 
-> Windows only. Requires `pycaw` (volume) and `Pillow` (screenshots), which are
-> in `requirements.txt`.
+> Windows-only for most tools. `open_file`/`open_folder` also work on
+> Linux/macOS (via `xdg-open`/`open`); `kill_process` works anywhere
+> (psutil). Tools that can't run on your platform return a clear error
+> instead of crashing. Windows-only code lives in `win_control.py` so the
+> core (`jarvis_core.py`) stays cross-platform.
+> Requires `pycaw` (volume) and `Pillow` (screenshots), which are in
+> `requirements.txt`.
 
 | Tool             | What it does                                              |
 | ---------------- | --------------------------------------------------------- |
@@ -165,8 +192,12 @@ confirm:
 - **Voice loop** — JARVIS asks *"Do you want me to…"* and waits for you to say
   *"yes"* or *"no"*.
 
-Pending approvals expire after 2 minutes. System-critical processes (explorer,
-svchost, lsass, etc.) are always refused even when approved.
+Pending approvals expire after 2 minutes (`JARVIS_APPROVAL_TTL`), are
+**persisted to disk** (`pending_approvals.json`, survives restarts), and can
+**never be replayed** — each approval id works exactly once. Every request,
+approval and denial is written to `audit/approvals.jsonl`. System-critical
+processes (explorer, svchost, lsass, etc.) are always refused even when
+approved.
 
 Example commands to try:
 - `"set the volume to 30"`
@@ -191,6 +222,29 @@ Set any of these environment variables before running:
 | `JARVIS_KEEP_ALIVE`   | `30m`                    | How long the model stays loaded in RAM      |
 | `JARVIS_HTTPS`        | `1`                      | Serve over HTTPS with a self-signed cert (`app.py`) |
 | `FLASK_DEBUG`         | `0`                      | Flask auto-reloader on/off (`app.py`)       |
+| `JARVIS_TOKEN`        | *(generated)*            | Web UI auth token; `none` disables auth     |
+| `JARVIS_RATE_LIMIT`   | `30`                     | `/ask` requests per minute per client IP    |
+| `JARVIS_MAX_BODY_KB`  | `16`                     | Max JSON request body size (`/ask` etc.)    |
+| `JARVIS_APPROVAL_TTL` | `120`                    | Seconds before a pending approval expires   |
+| `JARVIS_LOG_LEVEL`    | `INFO`                   | Log verbosity (`DEBUG`, `INFO`, `WARNING`…) |
+| `JARVIS_LOG_FILE`     | *(console only)*         | Optional log file path                      |
+
+## Logging
+
+All modules log through a shared `jarvis` logger with levels and timestamps
+(no scattered `print()` calls). Set `JARVIS_LOG_LEVEL=DEBUG` for verbose
+tool/trace output and `JARVIS_LOG_FILE=jarvis.log` to also write to a file.
+
+## Development
+
+```sh
+pip install -r requirements.txt -r requirements-dev.txt
+pytest          # 67 unit + web tests (no hardware/network needed)
+```
+
+GitHub Actions CI (`.github/workflows/ci.yml`) runs the test suite on
+Ubuntu + Windows on every push: syntax check, import/smoke tests, and the
+`--doctor` report.
 
 ## How fast replies work
 
@@ -239,11 +293,14 @@ internet connection.
 
 ```
 zee/
-├── app.py            # Flask web server + /ask API
+├── app.py            # Flask web server + /ask API (auth, rate limits)
 ├── jarvis.py         # Offline voice loop (Vosk + sounddevice)
-├── jarvis_core.py    # Shared TTS + Ollama brain (single source of truth)
+├── jarvis_core.py    # Shared TTS + Ollama brain + approvals + doctor (cross-platform)
+├── win_control.py    # Windows-only PC-control tools (apps, volume, Discord…)
 ├── templates/
 │   └── index.html    # Browser UI
+├── tests/            # Unit + web tests (pytest)
+├── audit/            # Approval audit log (approvals.jsonl, generated)
 └── model/            # Vosk model (download, not included)
 ```
 
@@ -251,7 +308,9 @@ zee/
 
 - **"Ollama error" / "trouble connecting to my cognitive processor"** — make
   sure `ollama serve` is running and `ollama list` shows the model named in
-  `OLLAMA_MODEL`.
+  `OLLAMA_MODEL`. Run `python jarvis_core.py --doctor` for a full report.
+- **`401 Unauthorized` in the web UI** — set the same `JARVIS_TOKEN` on the
+  server, or open the page with `?token=YOUR_TOKEN`.
 - **No sound** — the audio device may be busy; try closing apps using the
   speakers, or set `JARVIS_VOICE`/`JARVIS_RATE` to tweak TTS.
 - **Microphone not working in the browser** — Chrome blocks the mic on plain

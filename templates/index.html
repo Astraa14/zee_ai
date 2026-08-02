@@ -328,6 +328,21 @@
         // ==========================================
         let pendingApprovalId = null;
 
+        // Access token: from ?token= URL param, saved locally, or asked once.
+        let JARVIS_TOKEN = (new URLSearchParams(location.search).get('token') || null);
+        if (!JARVIS_TOKEN) JARVIS_TOKEN = localStorage.getItem('jarvis_token');
+        if (!JARVIS_TOKEN) {
+            const asked = prompt('Enter the JARVIS access token (shown in the server console):');
+            if (asked) JARVIS_TOKEN = asked;
+        }
+        if (JARVIS_TOKEN) localStorage.setItem('jarvis_token', JARVIS_TOKEN);
+
+        function authHeaders() {
+            const h = { 'Content-Type': 'application/json' };
+            if (JARVIS_TOKEN) h['Authorization'] = 'Bearer ' + JARVIS_TOKEN;
+            return h;
+        }
+
         function sendAsk(text) {
             logDiv.innerHTML += `<div class="status-text">Querying cognitive processor...</div>`;
             logDiv.scrollTop = logDiv.scrollHeight;
@@ -340,10 +355,11 @@
 
             fetch('/ask', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authHeaders(),
                 body: JSON.stringify({ text: text })
             })
                 .then(response => {
+                    if (response.status === 401) throw new Error('AUTH');
                     if (!response.ok) throw new Error('HTTP ' + response.status);
                     const reader = response.body.getReader();
                     const decoder = new TextDecoder();
@@ -366,7 +382,9 @@
                     return pump();
                 })
                 .catch(err => {
-                    logDiv.innerHTML += `<div class="status-text" style="color: red;">Error contacting core.</div>`;
+                    logDiv.innerHTML += `<div class="status-text" style="color: red;">` +
+                        (err.message === 'AUTH' ? 'Access token rejected — reload with ?token=YOUR_TOKEN' : 'Error contacting core.') +
+                        `</div>`;
                     resetUI();
                 });
         }
@@ -397,7 +415,7 @@
             if (!id) return;
             fetch('/approve', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authHeaders(),
                 body: JSON.stringify({ approval_id: id })
             })
                 .then(response => response.json())
@@ -416,7 +434,7 @@
             if (!id) return;
             fetch('/deny', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authHeaders(),
                 body: JSON.stringify({ approval_id: id })
             });
         });

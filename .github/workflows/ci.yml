@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install cross-platform dependencies
+        run: pip install -r requirements-core.txt -r requirements-dev.txt
+
+      - name: Install Windows-only extras
+        if: runner.os == 'Windows'
+        run: pip install -r requirements.txt
+
+      - name: Syntax check (all modules)
+        run: python -m py_compile app.py jarvis.py jarvis_core.py win_control.py
+
+      - name: Import / smoke tests
+        env:
+          JARVIS_HTTPS: "0"
+          JARVIS_TOKEN: "ci-token"
+        run: pytest -v
+
+      - name: Doctor report
+        env:
+          JARVIS_HTTPS: "0"
+        run: python jarvis_core.py --doctor || true
