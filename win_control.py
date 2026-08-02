@@ -106,9 +106,13 @@ def _resolve_app(app):
     hit = _APP_INDEX.get(app) or _APP_INDEX.get(app.replace(" ", ""))
     if hit:
         return hit, True
-    for name in _APP_INDEX:
-        if len(app) >= 5 and (app in name or name in app):
-            return _APP_INDEX[name], True
+    # Fuzzy match only in the SAFE direction: the user's word is a substring
+    # of an installed shortcut name ("chrome" -> "Google Chrome"). Never the
+    # reverse ("notepad & calc" must NOT match the "Notepad" shortcut).
+    if len(app) >= 3:
+        for name in _APP_INDEX:
+            if app in name:
+                return _APP_INDEX[name], True
     return app, False
 
 

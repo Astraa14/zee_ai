@@ -47,9 +47,19 @@ def test_system_action_rejects_unknown(monkeypatch):
     assert "error" in result
 
 
+def _fixed_index(monkeypatch):
+    """Deterministic app index so tests don't depend on the machine's Start Menu."""
+    monkeypatch.setattr(wc, "_APP_INDEX", {
+        "notepad": r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Notepad.lnk",
+        "google chrome": r"C:\Program Files\Google\Chrome\chrome.exe.lnk",
+        "steam": r"C:\Program Files (x86)\Steam\steam.exe.lnk",
+    })
+
+
 def test_open_app_validation(monkeypatch):
     """User-controlled strings must never reach the launcher."""
     monkeypatch.setattr("os.name", "nt")
+    _fixed_index(monkeypatch)
     started = []
     monkeypatch.setattr(wc, "_start", lambda target: started.append(target))
 
@@ -58,6 +68,9 @@ def test_open_app_validation(monkeypatch):
         result = wc.tool_open_app(bad)
         assert "error" in result, bad
     assert started == []
+
+    # substring match must not work backwards either
+    assert "error" in wc.tool_open_app("notepad & calc")
 
     # unknown bare words are rejected (no Windows error dialog)
     assert "error" in wc.tool_open_app("totallynotanapp12345")
@@ -70,6 +83,17 @@ def test_open_app_validation(monkeypatch):
     # empty input
     assert "error" in wc.tool_open_app("")
     assert "error" in wc.tool_open_app(None)
+
+
+def test_open_app_fuzzy_shortcut_match(monkeypatch):
+    """User's word as a substring of an installed shortcut name is allowed."""
+    monkeypatch.setattr("os.name", "nt")
+    _fixed_index(monkeypatch)
+    started = []
+    monkeypatch.setattr(wc, "_start", lambda target: started.append(target))
+    result = wc.tool_open_app("steam")
+    assert result.get("via") == "installed app"
+    assert started == [r"C:\Program Files (x86)\Steam\steam.exe.lnk"]
 
 
 def test_open_app_known_goes_to_launcher(monkeypatch):
