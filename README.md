@@ -122,6 +122,12 @@ tool-capable model (see [Requirements](#requirements)).
 | `get_time`       | Current date and time                               |
 | `get_location`   | Where the PC is (IP geolocation, or your stated location) |
 | `open_app`       | Launch **any installed app** (found via Start Menu/Desktop shortcuts: discord, steam, spotify, chrome…) or a website (youtube, google, gmail…) |
+| `open_file`      | Find a file by name (Documents/Downloads/Desktop/Pictures) and open it |
+| `read_notes`     | Read back your saved notes (`notes.txt`)            |
+| `list_processes` | What's running right now, most CPU-hungry first     |
+| `set_reminder`   | Speak a reminder after a duration ("remind me in 20 minutes…") |
+| `discord_contact`| Find a Discord user and open their DM (desktop app) |
+| `discord_call`   | Find a Discord user and start a voice call (desktop app) |
 | `system_info`    | CPU, RAM and battery usage                          |
 | `web_search`     | Web search (Wikipedia API, no key needed)           |
 | `get_weather`    | Current weather for any city (Open-Meteo, no key)   |
@@ -197,7 +203,23 @@ Set any of these environment variables before running:
 4. Replies are capped at `JARVIS_MAX_TOKENS` so JARVIS gets to the point.
 
 If your model doesn't support tools, JARVIS automatically falls back to plain
-chat — the tools are simply skipped.
+chat — the tools are simply skipped. `web_search` and `get_weather` need an
+internet connection.
+
+## Discord calls
+
+`discord_contact` and `discord_call` drive **your own Discord desktop app**
+(like you typing yourself — no bot, nothing against Discord's terms):
+
+1. Discord must be running and logged in (JARVIS launches it if not).
+2. `discord_contact` opens the quick switcher (Ctrl+K), types the name and
+   opens the DM.
+3. `discord_call` does the same, then clicks the **Start Voice Call** button;
+   if Discord doesn't expose the button to automation, it presses a hotkey
+   instead. For the most reliable calls, set a keybind in
+   Discord → Settings → Keybinds → **Start/Stop Voice Call** (e.g. `Ctrl+F10`)
+   and set `JARVIS_DISCORD_CALL_KEY=^F10` (SendKeys syntax) before starting.
+   Voice loop: "call <name> on discord", web UI: "call <name> on discord".
 
 ## Memory
 

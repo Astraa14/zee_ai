@@ -355,6 +355,184 @@ def tool_open_app(app):
     return {"error": f"Unsupported application name: {app!r}"}
 
 
+# ---------------- DISCORD (drives the desktop app, like the user typing) ----------------
+# This controls the user's own Discord client via UI automation — no bot, no
+# self-bot API, nothing against Discord's terms. Discord must be running.
+
+
+def _discord_sendkeys(keys):
+    """Activate the Discord window and send keystrokes via WScript.Shell."""
+    safe = keys.replace("'", "''")
+    script = (
+        "$p = Get-Process Discord -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1; "
+        "if (-not $p) { 'notfound' } else { "
+        "$ws = New-Object -ComObject WScript.Shell; "
+        "$ok = $ws.AppActivate($p.Id); "
+        "Start-Sleep -Milliseconds 600; "
+        f"$ws.SendKeys('{safe}'); "
+        "'ok' }"
+    )
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            capture_output=True, text=True, timeout=20,
+        )
+        return out.stdout.strip()
+    except Exception as e:
+        return f"error: {e}"
+
+
+def _uia_click(button_name):
+    """Click a Discord button by its accessibility name via UI Automation."""
+    script = (
+        "try { Add-Type -AssemblyName UIAutomationClient; "
+        "Add-Type -AssemblyName UIAutomationTypes; "
+        "$root = [System.Windows.Automation.AutomationElement]::RootElement; "
+        "$cond = New-Object System.Windows.Automation.PropertyCondition("
+        "[System.Windows.Automation.AutomationElement]::NameProperty, " +
+        f"'{button_name.replace(chr(39), chr(39) * 2)}'); "
+        "$el = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond); "
+        "if ($el) { $p = $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern); "
+        "$p.Invoke(); 'clicked' } else { 'notfound' } } catch { 'notfound' }"
+    )
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            capture_output=True, text=True, timeout=20,
+        )
+        return out.stdout.strip() == "clicked"
+    except Exception:
+        return False
+
+
+def tool_discord_contact(name):
+    """Find a Discord user and open their DM via the quick switcher (Ctrl+K)."""
+    name = (name or "").strip()
+    if not name:
+        return {"error": "No Discord user given."}
+    if _discord_sendkeys("^k") == "notfound":
+        return {"error": "Discord is not running. Start Discord first."}
+    time.sleep(1.2)
+    _discord_sendkeys(name)
+    time.sleep(1.5)
+    _discord_sendkeys("{ENTER}")
+    return {"opened_chat_with": name}
+
+
+def tool_discord_call(name):
+    """Open a DM with a Discord user and start a voice call."""
+    res = tool_discord_contact(name)
+    if "error" in res:
+        return res
+    time.sleep(1.5)
+    if _uia_click("Start Voice Call"):
+        return {"calling": name, "via": "call button"}
+    hotkey = os.getenv("JARVIS_DISCORD_CALL_KEY", "^`")
+    _discord_sendkeys(hotkey)
+    return {"calling": name,
+            "note": "If the call did not start, add the 'Start/Stop Voice Call' "
+                    "keybind in Discord settings and set JARVIS_DISCORD_CALL_KEY."}
+
+
+_DURATION_RE = re.compile(
+    r"(?=\d)"
+    r"(?:(?P<h>\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\s*)?"
+    r"(?:(?P<m>\d+(?:\.\d+)?)\s*(?:minutes?|mins?)\s*)?"
+    r"(?:(?P<s>\d+(?:\.\d+)?)\s*(?:seconds?|secs?))?",
+    re.IGNORECASE,
+)
+
+
+def _duration_to_minutes(duration):
+    """Parse '2 minutes', '1 hour 30 minutes', '45 seconds' into minutes."""
+    d = (duration or "").strip().lower()
+    m = _DURATION_RE.search(d)
+    if m and any(m.group(k) for k in ("h", "m", "s")):
+        hours = float(m.group("h") or 0)
+        mins = float(m.group("m") or 0)
+        secs = float(m.group("s") or 0)
+        return hours * 60 + mins + secs / 60
+    try:
+        return float(d)  # bare number = minutes
+    except ValueError:
+        return None
+
+
+def tool_set_reminder(duration, message=None):
+    """Speak a reminder after the given duration (e.g. '2 minutes')."""
+    minutes = _duration_to_minutes(duration)
+    if minutes is None or minutes <= 0:
+        return {"error": f"Could not understand the duration: {duration!r}"}
+    msg = (message or "Your reminder is due.").strip()
+    def fire():
+        time.sleep(minutes * 60)
+        speak(f"Reminder: {msg}")
+    threading.Thread(target=fire, daemon=True).start()
+    return {"reminder_set_for_minutes": minutes, "message": msg}
+
+
+def tool_list_processes():
+    """List the apps currently running, most CPU-hungry first."""
+    import psutil
+    procs = []
+    for p in psutil.process_iter(["name", "cpu_percent"]):
+        try:
+            procs.append((p.info["name"] or "?", round(p.info["cpu_percent"] or 0.0, 1)))
+        except Exception:
+            continue
+    procs.sort(key=lambda x: -x[1])
+    top = [{"name": n, "cpu_percent": c} for n, c in procs[:8]]
+    return {"running_apps": top, "total_processes": len(procs)}
+
+
+_FILE_SEARCH_DIRS = ["Documents", "Downloads", "Desktop", "Pictures"]
+
+
+def tool_open_file(name):
+    """Find a file by name in the usual folders and open it."""
+    name = (name or "").strip()
+    if not name:
+        return {"error": "No file name given."}
+    name = name.lower()
+    bases = [os.path.expanduser("~")]
+    for key in _FILE_SEARCH_DIRS:
+        d = os.path.join(os.path.expanduser("~"), key)
+        if os.path.isdir(d):
+            bases.append(d)
+    scanned = 0
+    for base in bases:
+        for root, dirs, files in os.walk(base):
+            dirs[:] = dirs[:25]
+            for f in files[:300]:
+                scanned += 1
+                if scanned > 5000:
+                    break
+                if name in f.lower():
+                    full = os.path.join(root, f)
+                    try:
+                        os.startfile(full)
+                    except OSError as e:
+                        return {"error": f"Could not open {full}: {e}"}
+                    return {"opened_file": full}
+            if scanned > 5000:
+                break
+        if scanned > 5000:
+            break
+    return {"error": f"No file matching {name!r} found in Documents, Downloads, Desktop or Pictures."}
+
+
+def tool_read_notes():
+    """Read back the last few saved notes."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notes.txt")
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = [l for l in f.read().splitlines() if l.strip()]
+    except OSError:
+        return {"notes": []}
+    return {"notes": lines[-10:]}
+
+
 def tool_system_info():
     import psutil
     info = {
@@ -692,6 +870,73 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "open_file",
+            "description": "Find a file by name in Documents, Downloads, Desktop or Pictures and open it (e.g. resume.pdf).",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string", "description": "File name or part of it"}},
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_notes",
+            "description": "Read back the user's saved notes (notes.txt).",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_processes",
+            "description": "List the apps currently running on this computer, most CPU-hungry first.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_reminder",
+            "description": "Set a reminder that JARVIS speaks out loud after a duration. Pass the duration in plain words, e.g. '2 minutes', '30 seconds' or '1 hour 30 minutes'. A bare number means minutes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "duration": {"type": "string", "description": "Time from now as words, e.g. '2 minutes'"},
+                    "message": {"type": "string", "description": "What to remind about"},
+                },
+                "required": ["duration"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "discord_contact",
+            "description": "Find a Discord user and open their direct message chat. Requires the Discord desktop app to be running.",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string", "description": "The Discord username to find"}},
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "discord_call",
+            "description": "Find a Discord user and start a voice call with them. Requires the Discord desktop app to be running.",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string", "description": "The Discord username to call"}},
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "system_info",
             "description": "Get CPU, RAM and battery usage of this computer.",
             "parameters": {"type": "object", "properties": {}},
@@ -843,6 +1088,12 @@ _TOOL_FUNCS = {
     "get_time": tool_get_time,
     "get_location": tool_get_location,
     "open_app": tool_open_app,
+    "open_file": tool_open_file,
+    "read_notes": tool_read_notes,
+    "list_processes": tool_list_processes,
+    "set_reminder": tool_set_reminder,
+    "discord_contact": tool_discord_contact,
+    "discord_call": tool_discord_call,
     "system_info": tool_system_info,
     "web_search": tool_web_search,
     "get_weather": tool_get_weather,
