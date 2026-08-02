@@ -199,7 +199,7 @@ def test_approval_audit_log(tmp_path):
     jc.deny_action(pending["id"])
     audit_file = tmp_path / "audit" / "approvals.jsonl"
     lines = audit_file.read_text(encoding="utf-8").strip().splitlines()
-    events = [json.loads(l)["event"] for l in lines]
+    events = [json.loads(entry)["event"] for entry in lines]
     assert "requested" in events and "denied" in events
 
 
@@ -209,6 +209,62 @@ def test_maybe_request_approval_phrases():
     assert jc.maybe_request_approval("lock my pc")["action"] == "system_action"
     assert jc.maybe_request_approval("close chrome")["action"] == "kill_process"
     assert jc.maybe_request_approval("what is the weather") is None
+
+
+# ---------------- web/weather tools (mocked HTTP) ----------------
+def test_tool_get_weather_mocked(monkeypatch):
+    def fake_fetch(url, timeout=10):
+        if "/search?" in url:
+            return {"results": [{"name": "Manila", "country": "Philippines",
+                                 "latitude": 14.6, "longitude": 121.0}]}
+        return {"current": {"temperature_2m": 30.5, "relative_humidity_2m": 70,
+                            "wind_speed_10m": 12.3, "weather_code": 1}}
+
+    monkeypatch.setattr(jc, "_fetch_json", fake_fetch)
+    result = jc.tool_get_weather("Manila")
+    assert result["city"] == "Manila"
+    assert result["country"] == "Philippines"
+    assert result["temp_c"] == 30.5
+    assert result["condition"] == "Mainly clear"
+
+
+def test_tool_get_weather_city_not_found(monkeypatch):
+    monkeypatch.setattr(jc, "_fetch_json", lambda url, timeout=10: {"results": []})
+    assert "error" in jc.tool_get_weather("Nowhereville")
+
+
+def test_tool_get_weather_network_error(monkeypatch):
+    def boom(url, timeout=10):
+        raise OSError("no network")
+
+    monkeypatch.setattr(jc, "_fetch_json", boom)
+    assert "error" in jc.tool_get_weather("Manila")
+
+
+def test_tool_get_weather_empty_city():
+    assert "error" in jc.tool_get_weather("   ")
+
+
+def test_tool_web_search_mocked(monkeypatch):
+    def fake_fetch(url, timeout=10):
+        return {"query": {"search": [
+            {"title": "Manila", "snippet": "<b>Manila</b> is the capital",
+             "pageid": 42},
+        ]}}
+
+    monkeypatch.setattr(jc, "_fetch_json", fake_fetch)
+    result = jc.tool_web_search("manila")
+    assert result["results"][0]["title"] == "Manila"
+    assert "<b>" not in result["results"][0]["snippet"]  # HTML stripped
+
+
+def test_tool_web_search_network_error(monkeypatch):
+    monkeypatch.setattr(jc, "_fetch_json", lambda url, timeout=10: (_ for _ in ()).throw(OSError("down")))
+    assert "error" in jc.tool_web_search("anything")
+
+
+def test_tool_web_search_empty_query():
+    assert "error" in jc.tool_web_search("")
 
 
 # ---------------- doctor / environment ----------------
@@ -225,7 +281,7 @@ def test_doctor_structure():
 def test_doctor_summary_lines():
     report = jc.doctor()
     lines = jc.doctor_summary(report)
-    assert any("Platform:" in l for l in lines)
+    assert any("Platform:" in line for line in lines)
 
 
 def test_check_ollama_never_raises():

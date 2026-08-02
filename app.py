@@ -189,6 +189,33 @@ def home():
     return render_template("index.html")
 
 
+@app.route("/health")
+def health():
+    """Readiness probe: reports Ollama + model availability.
+
+    Returns 200 when the brain can answer questions, 503 otherwise.
+    Audio is reported but does not gate readiness (TTS is best-effort).
+    """
+    ollama_ok = jarvis_core.check_ollama()
+    model_ok = False
+    if ollama_ok:
+        try:
+            jarvis_core.ollama.show(jarvis_core.OLLAMA_MODEL)
+            model_ok = True
+        except Exception:
+            model_ok = False
+    ready = ollama_ok and model_ok
+    payload = {
+        "status": "ok" if ready else "degraded",
+        "ready": ready,
+        "ollama": ollama_ok,
+        "model_available": model_ok,
+        "audio": jarvis_core.init_audio(),
+        "model": jarvis_core.OLLAMA_MODEL,
+    }
+    return jsonify(payload), (200 if ready else 503)
+
+
 @app.route("/ask", methods=["POST"])
 def ask():
     if not _ask_limiter.allow(_client_key()):

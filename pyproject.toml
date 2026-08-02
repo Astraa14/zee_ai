@@ -1,0 +1,12 @@
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+exclude = ["model", ".venv", "venv", "__pycache__"]
+
+[tool.ruff.lint]
+# E4/E7/E9 = real errors, F = pyflakes (unused/undefined), W = style warnings
+select = ["E4", "E7", "E9", "F", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately use plain asserts and monkeypatch attrs.
+"tests/*" = ["F401"]

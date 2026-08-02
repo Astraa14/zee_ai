@@ -121,6 +121,20 @@ Ollama + model availability, audio, Vosk model) and exits nonzero when
 critical pieces are missing. `app.py` and `jarvis.py` log the same report
 at startup.
 
+### Health endpoint
+
+`GET /health` returns readiness JSON — `200` when Ollama and the model are
+reachable, `503` otherwise:
+
+```json
+{"status": "ok", "ready": true, "ollama": true,
+ "model_available": true, "audio": true, "model": "llama3.2:latest"}
+```
+
+Useful for uptime monitors or restart scripts. Not behind the token (it only
+reveals availability); if you don't want it exposed, block it in your
+firewall or set `JARVIS_TOKEN` and ignore it.
+
 ### Desktop voice loop
 
 ```sh
@@ -239,12 +253,13 @@ tool/trace output and `JARVIS_LOG_FILE=jarvis.log` to also write to a file.
 
 ```sh
 pip install -r requirements.txt -r requirements-dev.txt
-pytest          # 67 unit + web tests (no hardware/network needed)
+ruff check .    # lint (E/F/W rules, pyproject.toml)
+pytest          # 77 unit + web tests (no hardware/network needed)
 ```
 
 GitHub Actions CI (`.github/workflows/ci.yml`) runs the test suite on
-Ubuntu + Windows on every push: syntax check, import/smoke tests, and the
-`--doctor` report.
+Ubuntu + Windows on every push: syntax check, ruff lint, import/smoke tests,
+and the `--doctor` report.
 
 ## How fast replies work
 

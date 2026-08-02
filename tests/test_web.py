@@ -139,6 +139,37 @@ def test_rate_limit(client, monkeypatch):
     assert _auth(client).status_code == 429
 
 
+# ---------------- health endpoint ----------------
+def test_health_ok(client, monkeypatch):
+    monkeypatch.setattr(jarvis_core, "check_ollama", lambda: True)
+    monkeypatch.setattr(jarvis_core.ollama, "show", lambda model: True)
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["status"] == "ok" and data["ready"] is True
+    assert data["ollama"] is True and data["model_available"] is True
+
+
+def test_health_degraded_when_ollama_down(client, monkeypatch):
+    monkeypatch.setattr(jarvis_core, "check_ollama", lambda: False)
+    resp = client.get("/health")
+    assert resp.status_code == 503
+    data = resp.get_json()
+    assert data["status"] == "degraded" and data["ready"] is False
+
+
+def test_health_degraded_when_model_missing(client, monkeypatch):
+    monkeypatch.setattr(jarvis_core, "check_ollama", lambda: True)
+
+    def no_model(model):
+        raise RuntimeError("model not found")
+
+    monkeypatch.setattr(jarvis_core.ollama, "show", no_model)
+    resp = client.get("/health")
+    assert resp.status_code == 503
+    assert resp.get_json()["model_available"] is False
+
+
 # ---------------- open fast-path ----------------
 def test_open_fastpath(client, monkeypatch):
     monkeypatch.setattr(jarvis_core, "run_tool",

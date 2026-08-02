@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import re
-import subprocess
 import sys
 import tempfile
 import threading
@@ -17,6 +16,12 @@ import uuid
 import edge_tts
 import ollama
 import pygame
+
+try:
+    import win_control
+except ImportError as e:
+    logging.getLogger("jarvis").warning(f"win_control not available: {e}")
+    win_control = None
 
 # ==========================================
 # LOGGING
@@ -337,7 +342,7 @@ def tool_read_notes():
     path = os.path.join(_BASE_DIR, "notes.txt")
     try:
         with open(path, encoding="utf-8") as f:
-            lines = [l for l in f.read().splitlines() if l.strip()]
+            lines = [line for line in f.read().splitlines() if line.strip()]
     except OSError:
         return {"notes": []}
     return {"notes": lines[-10:]}
@@ -495,13 +500,6 @@ def tool_create_note(content: str):
 # ==========================================
 # HANDS (PC Control) — Windows-only module
 # ==========================================
-try:
-    import win_control
-    log.debug("win_control loaded")
-except ImportError as e:
-    win_control = None
-    log.warning(f"win_control not available: {e}")
-
 KNOWN_APP_NAMES = set(getattr(win_control, "KNOWN_APP_NAMES", ()))
 
 
