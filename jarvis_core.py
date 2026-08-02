@@ -1147,14 +1147,16 @@ def doctor():
         try:
             importlib.import_module(mod)
             deps[label] = "ok"
-        except ImportError as e:
-            deps[label] = f"MISSING: {e}"
+        except Exception as e:
+            # ImportError for missing packages, OSError for import-time
+            # failures (e.g. sounddevice without a PortAudio system lib).
+            deps[label] = f"UNAVAILABLE: {e}"
     if os.name == "nt":
         try:
             importlib.import_module("pycaw")
             deps["pycaw"] = "ok"
-        except ImportError as e:
-            deps["pycaw"] = f"MISSING: {e}"
+        except Exception as e:
+            deps["pycaw"] = f"UNAVAILABLE: {e}"
     rep["dependencies"] = deps
 
     if check_ollama():
