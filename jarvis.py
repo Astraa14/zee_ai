@@ -1,6 +1,7 @@
 import json
 import os
 import queue
+import re
 import sys
 
 import sounddevice as sd
@@ -27,20 +28,19 @@ def speak(text):
 
 
 def open_application(command):
-    command = command.lower()
-
-    if "notepad" in command:
-        speak("Opening Notepad, sir.")
-        os.system("start notepad")
-    elif "calculator" in command:
-        speak("Opening Calculator.")
-        os.system("start calc")
-    elif "browser" in command or "chrome" in command:
-        speak("Opening your browser.")
-        os.system("start chrome")
-    else:
+    """Open any installed app or website from a voice command. Returns True if handled."""
+    m = re.match(
+        r"^(?:please\s+)?(?:open|start|launch|run)\s+(?:the\s+)?(.{1,40})$",
+        command,
+    )
+    name = m.group(1).strip() if m else None
+    if not name:
         return False
-    return True
+    result = jarvis_core.run_tool("open_app", {"app": name})
+    if result.get("opened") or result.get("opened_website"):
+        speak(f"Opening {name}.")
+        return True
+    return False
 
 
 def handle_brain(text):

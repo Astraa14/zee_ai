@@ -296,15 +296,56 @@ _KNOWN_APPS = {
 
 _SITE_SUFFIX_RE = re.compile(r"\.(com|net|org|io|tv|me|co|ph|app|ai)$")
 
+_APP_INDEX = None
+
+
+def _build_app_index():
+    """Scan Start Menu + Desktop shortcuts: {lowercase name: .lnk path}."""
+    import glob
+    index = {}
+    dirs = [
+        os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs"),
+        os.path.join(os.environ.get("PROGRAMDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs"),
+        os.path.join(os.environ.get("USERPROFILE", ""), "Desktop"),
+        os.path.join(os.environ.get("PUBLIC", ""), "Desktop"),
+    ]
+    for d in dirs:
+        if not d or not os.path.isdir(d):
+            continue
+        for lnk in glob.glob(os.path.join(d, "**", "*.lnk"), recursive=True):
+            name = os.path.splitext(os.path.basename(lnk))[0].lower()
+            index.setdefault(name, lnk)
+    return index
+
+
+def _resolve_app(app):
+    """Map an app name to a launch target: known apps, installed shortcuts, or the name itself."""
+    target = _KNOWN_APPS.get(app) or _KNOWN_APPS.get(app.replace(" ", ""))
+    if target:
+        return target
+    global _APP_INDEX
+    if _APP_INDEX is None:
+        _APP_INDEX = _build_app_index()
+    hit = _APP_INDEX.get(app) or _APP_INDEX.get(app.replace(" ", ""))
+    if hit:
+        return hit
+    for name in _APP_INDEX:
+        if len(app) >= 5 and (app in name or name in app):
+            return _APP_INDEX[name]
+    return app
+
 
 def tool_open_app(app):
     if os.name != "nt":
         return {"error": "App launching is only supported on Windows."}
     app = (app or "").strip().lower()
-    target = _KNOWN_APPS.get(app) or _KNOWN_APPS.get(app.replace(" ", "")) or app
+    target = _resolve_app(app)
     if target.startswith("https://") or target.startswith("http://"):
         os.system(f'start "" "{target}"')
         return {"opened_website": target}
+    if target.lower().endswith(".lnk"):
+        os.system(f'start "" "{target}"')
+        return {"opened": target, "via": "installed app"}
     if re.fullmatch(r"[a-z0-9 ._-]+", target):
         code = os.system(f"start {target}")
         return {"opened": target, "command_exit_code": code}

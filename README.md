@@ -121,7 +121,7 @@ tool-capable model (see [Requirements](#requirements)).
 | ---------------- | --------------------------------------------------- |
 | `get_time`       | Current date and time                               |
 | `get_location`   | Where the PC is (IP geolocation, or your stated location) |
-| `open_app`       | Launch desktop apps (notepad, calculator, browser…) **or websites** (youtube, google, gmail, facebook…) |
+| `open_app`       | Launch **any installed app** (found via Start Menu/Desktop shortcuts: discord, steam, spotify, chrome…) or a website (youtube, google, gmail…) |
 | `system_info`    | CPU, RAM and battery usage                          |
 | `web_search`     | Web search (Wikipedia API, no key needed)           |
 | `get_weather`    | Current weather for any city (Open-Meteo, no key)   |
