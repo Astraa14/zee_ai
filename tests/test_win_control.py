@@ -114,9 +114,9 @@ def test_open_app_known_goes_to_launcher(monkeypatch):
 
 
 def test_messenger_and_discord_require_automation(monkeypatch):
-    """Messenger search/contact automation is opt-in (JARVIS_ALLOW_AUTOMATION=1)."""
+    """Messenger search/contact automation is opt-in (ZEE_ALLOW_AUTOMATION=1)."""
     monkeypatch.setattr("os.name", "nt")
-    monkeypatch.delenv("JARVIS_ALLOW_AUTOMATION", raising=False)
+    monkeypatch.delenv("ZEE_ALLOW_AUTOMATION", raising=False)
 
     assert "Automation disabled" in wc.tool_discord_contact("John Doe")["error"]
     assert "Automation disabled" in wc.tool_discord_call("John Doe")["error"]
@@ -129,7 +129,7 @@ def test_messenger_and_discord_require_automation(monkeypatch):
 
 def test_open_messenger_search_url(monkeypatch):
     """With automation on, a valid name produces a search URL."""
-    monkeypatch.setenv("JARVIS_ALLOW_AUTOMATION", "1")
+    monkeypatch.setenv("ZEE_ALLOW_AUTOMATION", "1")
     opened = []
     monkeypatch.setattr(wc, "open_url", lambda url: opened.append(url) or None)
     result = wc.tool_open_messenger_search("John Doe")
@@ -139,7 +139,7 @@ def test_open_messenger_search_url(monkeypatch):
 
 def test_open_messenger_search_rejects_injection(monkeypatch):
     """Shell metacharacters and oversized inputs never reach a URL."""
-    monkeypatch.setenv("JARVIS_ALLOW_AUTOMATION", "1")
+    monkeypatch.setenv("ZEE_ALLOW_AUTOMATION", "1")
     opened = []
     monkeypatch.setattr(wc, "open_url", lambda url: opened.append(url) or None)
     for bad in ("John; del C:\\", "John & rm", "$(whoami)", "name " * 100):

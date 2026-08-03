@@ -29,18 +29,18 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Syntax check (all modules)
-        run: python -m py_compile app.py jarvis.py jarvis_core.py win_control.py
+        run: python -m compileall -q . -x "(^|/)(model|\.git|__pycache__|\.pytest_cache|\.ruff_cache|templates)(/|$)"
 
       - name: Lint (ruff)
         run: ruff check .
 
       - name: Import / smoke tests
         env:
-          JARVIS_HTTPS: "0"
-          JARVIS_TOKEN: "ci-token"
+          ZEE_HTTPS: "0"
+          ZEE_TOKEN: "ci-token"
         run: pytest -v
 
       - name: Doctor report
         env:
-          JARVIS_HTTPS: "0"
-        run: python jarvis_core.py --doctor || true
+          ZEE_HTTPS: "0"
+        run: python zee_core.py --doctor || true

@@ -21,34 +21,34 @@ import pygame
 try:
     import win_control
 except ImportError as e:
-    logging.getLogger("jarvis").warning(f"win_control not available: {e}")
+    logging.getLogger("zee").warning(f"win_control not available: {e}")
     win_control = None
 
 # ==========================================
 # LOGGING
 # ==========================================
-log = logging.getLogger("jarvis")
+log = logging.getLogger("zee")
 _logging_configured = False
 
 
 def setup_logging():
-    """Configure the 'jarvis' logger once (console + rotating file handler).
+    """Configure the 'zee' logger once (console + rotating file handler).
 
-    Level from JARVIS_LOG_LEVEL (INFO default). Log file: JARVIS_LOG_FILE or
-    jarvis.log in the project root, rotated at 1 MB (3 backups). Safe to call
+    Level from ZEE_LOG_LEVEL (INFO default). Log file: ZEE_LOG_FILE or
+    zee.log in the project root, rotated at 1 MB (3 backups). Safe to call
     from any module; idempotent.
     """
     global _logging_configured
     if _logging_configured:
         return
     _logging_configured = True
-    log.setLevel(os.getenv("JARVIS_LOG_LEVEL", "INFO").upper())
+    log.setLevel(os.getenv("ZEE_LOG_LEVEL", "INFO").upper())
     fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s", datefmt="%H:%M:%S")
     console = logging.StreamHandler()
     console.setFormatter(fmt)
     log.addHandler(console)
-    logfile = os.getenv("JARVIS_LOG_FILE") or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "jarvis.log")
+    logfile = os.getenv("ZEE_LOG_FILE") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "zee.log")
     try:
         rotating = logging.handlers.RotatingFileHandler(
             logfile, maxBytes=1_000_000, backupCount=3, encoding="utf-8",
@@ -64,15 +64,15 @@ def setup_logging():
 setup_logging()
 
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:latest")
-JARVIS_VOICE = os.getenv("JARVIS_VOICE", "en-US-ChristopherNeural")
-JARVIS_RATE = os.getenv("JARVIS_RATE", "+10%")
-JARVIS_MAX_TOKENS = int(os.getenv("JARVIS_MAX_TOKENS", "150"))
-JARVIS_TEMPERATURE = float(os.getenv("JARVIS_TEMPERATURE", "0.7"))
-JARVIS_KEEP_ALIVE = os.getenv("JARVIS_KEEP_ALIVE", "30m")
-JARVIS_NUM_CTX = int(os.getenv("JARVIS_NUM_CTX", "4096"))
+ZEE_VOICE = os.getenv("ZEE_VOICE", "en-US-ChristopherNeural")
+ZEE_RATE = os.getenv("ZEE_RATE", "+10%")
+ZEE_MAX_TOKENS = int(os.getenv("ZEE_MAX_TOKENS", "150"))
+ZEE_TEMPERATURE = float(os.getenv("ZEE_TEMPERATURE", "0.7"))
+ZEE_KEEP_ALIVE = os.getenv("ZEE_KEEP_ALIVE", "30m")
+ZEE_NUM_CTX = int(os.getenv("ZEE_NUM_CTX", "4096"))
 
 SYSTEM_PROMPT = (
-    "You are JARVIS, a helpful AI assistant. Keep your answers brief, "
+    "You are ZEE, a helpful AI assistant. Keep your answers brief, "
     "conversational, and under 3 sentences. Do not use any special formatting "
     "or symbols like asterisks, as they will be read out loud by a text-to-speech engine. "
     "Only call a tool when the user's request clearly needs it (e.g. the time, "
@@ -90,7 +90,7 @@ SYSTEM_PROMPT = (
 
 # ---------------- MEMORY (conversation history + learned facts) ----------------
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-_MEMORY_FILE = os.path.join(_BASE_DIR, "memory.json")
+_MEMORY_FILE = os.path.join(_BASE_DIR, "zee_memory.json")
 _memory = {}
 _memory_lock = threading.Lock()
 _history = []  # in-memory conversation turns (user/assistant pairs)
@@ -154,7 +154,7 @@ def _system_prompt():
 
 
 def _remember(user_text, reply):
-    """Keep the last few turns so JARVIS can follow conversations."""
+    """Keep the last few turns so ZEE can follow conversations."""
     with _memory_lock:
         _history.extend([
             {"role": "user", "content": user_text},
@@ -212,10 +212,10 @@ def speak(text, wait=False):
     speakers. By default this runs in a background thread; pass wait=True
     to block until playback finishes.
     """
-    log.info(f"JARVIS: {text}")
+    log.info(f"ZEE: {text}")
 
     async def generate(path, ready):
-        communicate = edge_tts.Communicate(text, JARVIS_VOICE, rate=JARVIS_RATE)
+        communicate = edge_tts.Communicate(text, ZEE_VOICE, rate=ZEE_RATE)
         with open(path, "wb") as f:
             stream = communicate.stream()
             async for chunk in stream:
@@ -225,7 +225,7 @@ def speak(text, wait=False):
         ready.set()
 
     def worker():
-        fd, path = tempfile.mkstemp(suffix=".mp3", prefix="jarvis_")
+        fd, path = tempfile.mkstemp(suffix=".mp3", prefix="zee_")
         os.close(fd)
         ready = threading.Event()
         writer = threading.Thread(
@@ -264,13 +264,13 @@ _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
 _DANGEROUS_CHARS_RE = re.compile(r"[\n\r;|`$&]")
 
 # Desktop/browser automation (Discord, messenger search, ...) is opt-in.
-AUTOMATION_ENABLED = os.getenv("JARVIS_ALLOW_AUTOMATION", "0") == "1"
-AUTOMATION_DISABLED_MSG = "Automation disabled; set JARVIS_ALLOW_AUTOMATION=1 to enable"
+AUTOMATION_ENABLED = os.getenv("ZEE_ALLOW_AUTOMATION", "0") == "1"
+AUTOMATION_DISABLED_MSG = "Automation disabled; set ZEE_ALLOW_AUTOMATION=1 to enable"
 
 
 def automation_enabled():
     """True when desktop/browser automation is opted in via env."""
-    return os.getenv("JARVIS_ALLOW_AUTOMATION", "0") == "1"
+    return os.getenv("ZEE_ALLOW_AUTOMATION", "0") == "1"
 
 
 def automation_denied():
@@ -378,7 +378,7 @@ def tool_get_location():
 
 def tool_read_notes():
     """Read back the last few saved notes."""
-    path = os.path.join(_BASE_DIR, "notes.txt")
+    path = os.path.join(_BASE_DIR, "zee_notes.txt")
     try:
         with open(path, encoding="utf-8") as f:
             lines = [line for line in f.read().splitlines() if line.strip()]
@@ -529,7 +529,7 @@ def tool_create_note(content: str):
     content = clean_text(content, 2000)
     if not content:
         return {"error": "No note content given."}
-    notes_file = os.path.join(_BASE_DIR, "notes.txt")
+    notes_file = os.path.join(_BASE_DIR, "zee_notes.txt")
     from datetime import datetime
     with open(notes_file, "a", encoding="utf-8") as f:
         f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M')}] {content}\n")
@@ -547,9 +547,9 @@ KNOWN_APP_NAMES = set(getattr(win_control, "KNOWN_APP_NAMES", ()))
 # ==========================================
 DANGEROUS_TOOLS = {"kill_process", "system_action"}
 
-_APPROVAL_FILE = os.path.join(_BASE_DIR, "pending_approvals.json")
-_APPROVALS_LOG = os.path.join(_BASE_DIR, "approvals.log")
-_APPROVAL_TTL = int(os.getenv("JARVIS_APPROVAL_TTL", "120"))
+_APPROVAL_FILE = os.path.join(_BASE_DIR, "zee_pending_approvals.json")
+_APPROVALS_LOG = os.path.join(_BASE_DIR, "zee_approvals.log")
+_APPROVAL_TTL = int(os.getenv("ZEE_APPROVAL_TTL", "120"))
 
 _pending_approvals = {}
 _approval_lock = threading.Lock()
@@ -629,6 +629,18 @@ def request_approval(name, args, actor="unknown"):
     _save_pending_approvals()
     _append_approval("requested", aid, name, args, now + _APPROVAL_TTL, actor)
     log.warning(f"Approval requested: {name}({json.dumps(args)}) [id={aid}, actor={actor}]")
+    try:
+        import events
+        events.broadcast({
+            "type": "approval",
+            "id": aid,
+            "action": name,
+            "args": args,
+            "expires": round(now + _APPROVAL_TTL, 3),
+            "actor": actor,
+        })
+    except Exception:
+        pass
     return {
         "needs_approval": True,
         "id": aid,
@@ -729,7 +741,7 @@ _CORE_TOOLS = [
         "type": "function",
         "function": {
             "name": "read_notes",
-            "description": "Read back the user's saved notes (notes.txt).",
+            "description": "Read back the user's saved notes (zee_notes.txt).",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -745,7 +757,7 @@ _CORE_TOOLS = [
         "type": "function",
         "function": {
             "name": "set_reminder",
-            "description": "Set a reminder that JARVIS speaks out loud after a duration. Pass the duration in plain words, e.g. '2 minutes', '30 seconds' or '1 hour 30 minutes'. A bare number means minutes.",
+            "description": "Set a reminder that ZEE speaks out loud after a duration. Pass the duration in plain words, e.g. '2 minutes', '30 seconds' or '1 hour 30 minutes'. A bare number means minutes.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -792,7 +804,7 @@ _CORE_TOOLS = [
         "type": "function",
         "function": {
             "name": "create_note",
-            "description": "Save a note to a local notes.txt file.",
+            "description": "Save a note to a local zee_notes.txt file.",
             "parameters": {
                 "type": "object",
                 "properties": {"content": {"type": "string", "description": "The note text to save"}},
@@ -852,11 +864,11 @@ def _chat(messages, tools, stream=False):
     kwargs = {
         "model": OLLAMA_MODEL,
         "messages": messages,
-        "keep_alive": JARVIS_KEEP_ALIVE,
+        "keep_alive": ZEE_KEEP_ALIVE,
         "options": {
-            "num_predict": JARVIS_MAX_TOKENS,
-            "temperature": JARVIS_TEMPERATURE,
-            "num_ctx": JARVIS_NUM_CTX,
+            "num_predict": ZEE_MAX_TOKENS,
+            "temperature": ZEE_TEMPERATURE,
+            "num_ctx": ZEE_NUM_CTX,
         },
     }
     if tools:
@@ -899,7 +911,7 @@ def _parse_inline_tool_call(content):
 
 
 _GREETING_RE = re.compile(
-    r"^(hi|hiya|hello|hey|yo|sup|wassup|what'?s up|good\s+(morning|afternoon|evening|night))[!.?\s]*(jarvis)?[!.?\s]*$",
+    r"^(hi|hiya|hello|hey|yo|sup|wassup|what'?s up|good\s+(morning|afternoon|evening|night))[!.?\s]*(zee)?[!.?\s]*$",
     re.IGNORECASE,
 )
 
@@ -1238,7 +1250,7 @@ def doctor():
 
     model_dir = os.path.join(os.getcwd(), "model")
     rep["vosk_model"] = ("ok" if os.path.isdir(model_dir)
-                         else "missing (only needed for jarvis.py voice loop)")
+                         else "missing (only needed for zee.py voice loop)")
     rep["automation_enabled"] = automation_enabled()
 
     critical_ok = (
@@ -1260,7 +1272,7 @@ def doctor_summary(rep):
     lines.append(f"  model         {rep.get('model')}")
     lines.append(f"  audio         {rep.get('audio')}")
     lines.append(f"  vosk model    {rep.get('vosk_model')}")
-    lines.append(f"  automation    {'enabled' if rep.get('automation_enabled') else 'DISABLED (JARVIS_ALLOW_AUTOMATION=1)'}")
+    lines.append(f"  automation    {'enabled' if rep.get('automation_enabled') else 'DISABLED (ZEE_ALLOW_AUTOMATION=1)'}")
     return lines
 
 

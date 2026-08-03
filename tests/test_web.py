@@ -7,12 +7,12 @@ import json
 
 import pytest
 
-import jarvis_core
-import app as app_module
+import zee_core
+import zee_api as app_module
 
 
 class _FakeStream:
-    """Drop-in for jarvis_core.StreamAsk that yields canned text."""
+    """Drop-in for zee_core.StreamAsk that yields canned text."""
 
     def __init__(self, text, actor="web"):
         self._text = text
@@ -27,12 +27,14 @@ class _FakeStream:
 
 @pytest.fixture(autouse=True)
 def fake_brain(monkeypatch):
-    monkeypatch.setattr(jarvis_core, "StreamAsk", _FakeStream)
-    monkeypatch.setattr(jarvis_core, "speak", lambda *a, **k: None)
-    monkeypatch.setattr(jarvis_core, "run_tool", lambda *a, **k: {"error": "not used"})
-    monkeypatch.setattr(jarvis_core, "ollama_probe", lambda: "unavailable")
-    monkeypatch.setattr(jarvis_core, "automation_enabled", lambda: False)
+    monkeypatch.setattr(zee_core, "StreamAsk", _FakeStream)
+    monkeypatch.setattr(zee_core, "speak", lambda *a, **k: None)
+    monkeypatch.setattr(zee_core, "run_tool", lambda *a, **k: {"error": "not used"})
+    monkeypatch.setattr(zee_core, "ollama_probe", lambda: "unavailable")
+    monkeypatch.setattr(zee_core, "automation_enabled", lambda: False)
     monkeypatch.setattr(app_module, "_token", "ci-test-token")
+    monkeypatch.setattr(app_module, "_ask_limiter",
+                        app_module._RateLimiter(1000, 60))
     yield
 
 
@@ -101,7 +103,7 @@ def test_ask_body_too_large(client):
 
 
 def test_invalid_approval_id_format(client, monkeypatch):
-    monkeypatch.setattr(jarvis_core, "approve_action", lambda aid, actor="web": {"ok": True})
+    monkeypatch.setattr(zee_core, "approve_action", lambda aid, actor="web": {"ok": True})
     resp = client.post("/approve",
                        data=json.dumps({"approval_id": "not-hex!!"}),
                        content_type="application/json",
@@ -116,7 +118,7 @@ def test_approve_success(client, monkeypatch):
         assert actor == "web"
         return {"executed": "lock"}
 
-    monkeypatch.setattr(jarvis_core, "approve_action", fake_approve)
+    monkeypatch.setattr(zee_core, "approve_action", fake_approve)
     resp = client.post("/approve",
                        data=json.dumps({"approval_id": "a" * 16}),
                        content_type="application/json",
@@ -126,7 +128,7 @@ def test_approve_success(client, monkeypatch):
 
 
 def test_deny_success(client, monkeypatch):
-    monkeypatch.setattr(jarvis_core, "deny_action", lambda aid, actor="web": {"denied": True})
+    monkeypatch.setattr(zee_core, "deny_action", lambda aid, actor="web": {"denied": True})
     resp = client.post("/deny",
                        data=json.dumps({"approval_id": "b" * 16}),
                        content_type="application/json",
@@ -155,8 +157,8 @@ def test_rate_limit_is_per_token(client, monkeypatch):
 
 # ---------------- health endpoint ----------------
 def test_health_ok(client, monkeypatch):
-    monkeypatch.setattr(jarvis_core, "check_ollama", lambda: True)
-    monkeypatch.setattr(jarvis_core.ollama, "show", lambda model: True)
+    monkeypatch.setattr(zee_core, "check_ollama", lambda: True)
+    monkeypatch.setattr(zee_core.ollama, "show", lambda model: True)
     resp = client.get("/health")
     assert resp.status_code == 200
     data = resp.get_json()
@@ -167,17 +169,17 @@ def test_health_ok(client, monkeypatch):
 
 
 def test_health_reports_automation_when_enabled(client, monkeypatch):
-    monkeypatch.setattr(jarvis_core, "check_ollama", lambda: True)
-    monkeypatch.setattr(jarvis_core.ollama, "show", lambda model: True)
-    monkeypatch.setattr(jarvis_core, "automation_enabled", lambda: True)
-    monkeypatch.setattr(jarvis_core, "ollama_probe", lambda: "ok")
+    monkeypatch.setattr(zee_core, "check_ollama", lambda: True)
+    monkeypatch.setattr(zee_core.ollama, "show", lambda model: True)
+    monkeypatch.setattr(zee_core, "automation_enabled", lambda: True)
+    monkeypatch.setattr(zee_core, "ollama_probe", lambda: "ok")
     data = client.get("/health").get_json()
     assert data["automation_enabled"] is True
     assert data["ollama_detail"] == "ok"
 
 
 def test_health_degraded_when_ollama_down(client, monkeypatch):
-    monkeypatch.setattr(jarvis_core, "check_ollama", lambda: False)
+    monkeypatch.setattr(zee_core, "check_ollama", lambda: False)
     resp = client.get("/health")
     assert resp.status_code == 503
     data = resp.get_json()
@@ -185,12 +187,12 @@ def test_health_degraded_when_ollama_down(client, monkeypatch):
 
 
 def test_health_degraded_when_model_missing(client, monkeypatch):
-    monkeypatch.setattr(jarvis_core, "check_ollama", lambda: True)
+    monkeypatch.setattr(zee_core, "check_ollama", lambda: True)
 
     def no_model(model):
         raise RuntimeError("model not found")
 
-    monkeypatch.setattr(jarvis_core.ollama, "show", no_model)
+    monkeypatch.setattr(zee_core.ollama, "show", no_model)
     resp = client.get("/health")
     assert resp.status_code == 503
     assert resp.get_json()["model_available"] is False
@@ -198,7 +200,7 @@ def test_health_degraded_when_model_missing(client, monkeypatch):
 
 # ---------------- open fast-path ----------------
 def test_open_fastpath(client, monkeypatch):
-    monkeypatch.setattr(jarvis_core, "run_tool",
+    monkeypatch.setattr(zee_core, "run_tool",
                         lambda name, args, actor="web": {"opened": "notepad"})
     resp = _auth(client, {"text": "open notepad"})
     assert resp.status_code == 200
@@ -207,7 +209,7 @@ def test_open_fastpath(client, monkeypatch):
 
 
 def test_open_fastpath_rejects_questions(client, monkeypatch):
-    monkeypatch.setattr(jarvis_core, "run_tool",
+    monkeypatch.setattr(zee_core, "run_tool",
                         lambda name, args, actor="web": {"error": "nope"})
     resp = _auth(client, {"text": "what is an open book"})
     assert resp.status_code == 200  # goes to the brain instead

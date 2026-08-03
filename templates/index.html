@@ -2,7 +2,7 @@
 <html>
 
 <head>
-    <title>JARVIS Interface</title>
+    <title>ZEE Interface</title>
     <style>
         body {
             background-color: #04090b;
@@ -167,7 +167,7 @@
             margin-top: 10px;
         }
 
-        .jarvis-text {
+        .zee-text {
             color: #00f2ff;
             margin-top: 5px;
             margin-bottom: 20px;
@@ -329,17 +329,17 @@
         let pendingApprovalId = null;
 
         // Access token: from ?token= URL param, saved locally, or asked once.
-        let JARVIS_TOKEN = (new URLSearchParams(location.search).get('token') || null);
-        if (!JARVIS_TOKEN) JARVIS_TOKEN = localStorage.getItem('jarvis_token');
-        if (!JARVIS_TOKEN) {
-            const asked = prompt('Enter the JARVIS access token (shown in the server console):');
-            if (asked) JARVIS_TOKEN = asked;
+        let ZEE_TOKEN = (new URLSearchParams(location.search).get('token') || null);
+        if (!ZEE_TOKEN) ZEE_TOKEN = localStorage.getItem('zee_token');
+        if (!ZEE_TOKEN) {
+            const asked = prompt('Enter the ZEE access token (shown in the server console):');
+            if (asked) ZEE_TOKEN = asked;
         }
-        if (JARVIS_TOKEN) localStorage.setItem('jarvis_token', JARVIS_TOKEN);
+        if (ZEE_TOKEN) localStorage.setItem('zee_token', ZEE_TOKEN);
 
         function authHeaders() {
             const h = { 'Content-Type': 'application/json' };
-            if (JARVIS_TOKEN) h['Authorization'] = 'Bearer ' + JARVIS_TOKEN;
+            if (ZEE_TOKEN) h['Authorization'] = 'Bearer ' + ZEE_TOKEN;
             return h;
         }
 
@@ -348,8 +348,8 @@
             logDiv.scrollTop = logDiv.scrollHeight;
 
             const streamEl = document.createElement('div');
-            streamEl.className = 'jarvis-text';
-            streamEl.innerHTML = '<b>JARVIS:</b> <span class="stream-text"></span>';
+            streamEl.className = 'zee-text';
+            streamEl.innerHTML = '<b>ZEE:</b> <span class="stream-text"></span>';
             logDiv.appendChild(streamEl);
             const textEl = streamEl.querySelector('.stream-text');
 
@@ -396,7 +396,7 @@
             } else if (data.approval_id) {
                 pendingApprovalId = data.approval_id;
                 document.getElementById('approval-message').textContent =
-                    data.approval_message || 'JARVIS is requesting to take an action on this computer.';
+                    data.approval_message || 'ZEE is requesting to take an action on this computer.';
                 document.getElementById('approval-overlay').style.display = 'flex';
             } else if (data.done) {
                 resetUI();
@@ -420,7 +420,7 @@
             })
                 .then(response => response.json())
                 .then(data => {
-                    logDiv.innerHTML += `<div class="jarvis-text"><b>JARVIS:</b> ${data.message || 'Done.'}</div>`;
+                    logDiv.innerHTML += `<div class="zee-text"><b>ZEE:</b> ${data.message || 'Done.'}</div>`;
                     logDiv.scrollTop = logDiv.scrollHeight;
                 })
                 .catch(() => {

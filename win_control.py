@@ -1,8 +1,8 @@
-"""Windows-only PC-control tools for JARVIS.
+"""Windows-only PC-control tools for ZEE.
 
 Everything in this module drives the local computer (apps, files, volume,
 media, brightness, screenshots, typing, processes, system actions, Discord
-UI automation). It is imported by jarvis_core on every platform: each tool
+UI automation). It is imported by zee_core on every platform: each tool
 checks the OS first and returns a clear error on unsupported platforms so
 the core stays fully cross-platform.
 
@@ -21,7 +21,7 @@ import subprocess
 import time
 import urllib.parse
 
-log = logging.getLogger("jarvis.win")
+log = logging.getLogger("zee.win")
 
 MAX_ARG_LEN = 1000
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -55,12 +55,12 @@ def sanitize_input(text, maxlen=120):
 
 
 def _automation_enabled():
-    """Desktop/browser automation is opt-in via JARVIS_ALLOW_AUTOMATION=1."""
-    return os.getenv("JARVIS_ALLOW_AUTOMATION", "0") == "1"
+    """Desktop/browser automation is opt-in via ZEE_ALLOW_AUTOMATION=1."""
+    return os.getenv("ZEE_ALLOW_AUTOMATION", "0") == "1"
 
 
 def automation_denied():
-    return {"error": "Automation disabled; set JARVIS_ALLOW_AUTOMATION=1 to enable"}
+    return {"error": "Automation disabled; set ZEE_ALLOW_AUTOMATION=1 to enable"}
 
 
 def safe_run(cmd, timeout=10):
@@ -128,7 +128,7 @@ _KNOWN_APPS = {
     "facebook messages page": "https://www.facebook.com/messages",
 }
 
-# Opening these requires the JARVIS_ALLOW_AUTOMATION opt-in (logged-in web session).
+# Opening these requires the ZEE_ALLOW_AUTOMATION opt-in (logged-in web session).
 MESSENGER_KEYS = {"messenger", "facebook messenger", "facebook messages", "facebook messages page"}
 
 _MESSENGER_SEARCH_RE = re.compile(
@@ -392,7 +392,7 @@ def _uia_click(button_name):
 def tool_discord_contact(name: str, search: bool = False):
     """Find a Discord user and open their DM via the quick switcher (Ctrl+K).
 
-    Requires JARVIS_ALLOW_AUTOMATION=1 and the Discord desktop app running.
+    Requires ZEE_ALLOW_AUTOMATION=1 and the Discord desktop app running.
     """
     if not _automation_enabled():
         return automation_denied()
@@ -420,11 +420,11 @@ def tool_discord_call(name: str):
     time.sleep(1.5)
     if _uia_click("Start Voice Call"):
         return {"calling": name, "via": "call button"}
-    hotkey = os.getenv("JARVIS_DISCORD_CALL_KEY", "^`")
+    hotkey = os.getenv("ZEE_DISCORD_CALL_KEY", "^`")
     _discord_sendkeys(hotkey)
     return {"calling": name,
             "note": "If the call did not start, add the 'Start/Stop Voice Call' "
-                    "keybind in Discord settings and set JARVIS_DISCORD_CALL_KEY."}
+                    "keybind in Discord settings and set ZEE_DISCORD_CALL_KEY."}
 
 
 # ---------------- PC CONTROL (volume / media / brightness / typing) ----------------
@@ -643,13 +643,13 @@ def tool_system_action(action: str):
     return {"executed": action}
 
 
-# ---------------- SCHEMA (merged into jarvis_core.TOOLS) ----------------
+# ---------------- SCHEMA (merged into zee_core.TOOLS) ----------------
 WIN_TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "open_app",
-            "description": "Open a desktop application (e.g. notepad, calculator, browser, paint, terminal) or a website (e.g. youtube, google, gmail, facebook, netflix). For a Messenger/Facebook contact search say 'messenger search <name>'. Opening messenger or running a messenger search requires the JARVIS_ALLOW_AUTOMATION opt-in.",
+            "description": "Open a desktop application (e.g. notepad, calculator, browser, paint, terminal) or a website (e.g. youtube, google, gmail, facebook, netflix). For a Messenger/Facebook contact search say 'messenger search <name>'. Opening messenger or running a messenger search requires the ZEE_ALLOW_AUTOMATION opt-in.",
             "parameters": {
                 "type": "object",
                 "properties": {"app": {"type": "string", "description": "Name of the application to open, or \"messenger search <name>\""}},
@@ -673,7 +673,7 @@ WIN_TOOLS = [
         "type": "function",
         "function": {
             "name": "discord_contact",
-            "description": "Find a Discord user and open their direct message chat. Requires the Discord desktop app running and the JARVIS_ALLOW_AUTOMATION opt-in.",
+            "description": "Find a Discord user and open their direct message chat. Requires the Discord desktop app running and the ZEE_ALLOW_AUTOMATION opt-in.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -688,7 +688,7 @@ WIN_TOOLS = [
         "type": "function",
         "function": {
             "name": "open_messenger_search",
-            "description": "Search Messenger (Facebook) for a contact and open the result in the browser. Requires the JARVIS_ALLOW_AUTOMATION opt-in.",
+            "description": "Search Messenger (Facebook) for a contact and open the result in the browser. Requires the ZEE_ALLOW_AUTOMATION opt-in.",
             "parameters": {
                 "type": "object",
                 "properties": {"name": {"type": "string", "description": "Contact name to search for, e.g. John Doe"}},

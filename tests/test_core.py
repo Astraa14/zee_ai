@@ -1,4 +1,4 @@
-"""Unit tests for jarvis_core: parsers, sanitization, guards, approvals.
+"""Unit tests for zee_core: parsers, sanitization, guards, approvals.
 
 These never touch the network, the audio device or a real LLM.
 """
@@ -7,15 +7,15 @@ import time
 
 import pytest
 
-import jarvis_core as jc
+import zee_core as jc
 
 
 @pytest.fixture(autouse=True)
 def isolate_state(tmp_path, monkeypatch):
     """Point all persistence (memory, approvals, audit) at a temp dir."""
-    monkeypatch.setattr(jc, "_MEMORY_FILE", str(tmp_path / "memory.json"))
-    monkeypatch.setattr(jc, "_APPROVAL_FILE", str(tmp_path / "pending_approvals.json"))
-    monkeypatch.setattr(jc, "_APPROVALS_LOG", str(tmp_path / "approvals.log"))
+    monkeypatch.setattr(jc, "_MEMORY_FILE", str(tmp_path / "zee_memory.json"))
+    monkeypatch.setattr(jc, "_APPROVAL_FILE", str(tmp_path / "zee_pending_approvals.json"))
+    monkeypatch.setattr(jc, "_APPROVALS_LOG", str(tmp_path / "zee_approvals.log"))
     jc._load_memory()
     jc._pending_approvals.clear()
     yield
@@ -37,8 +37,8 @@ def test_extract_facts_name(monkeypatch):
     monkeypatch.setattr(jc, "_save_memory", lambda: None)
     jc._extract_facts("please call me Ron")
     assert jc._memory.get("name") == "Ron"
-    jc._extract_facts("my name's jarvis test")
-    assert jc._memory.get("name") == "Jarvis"
+    jc._extract_facts("my name's zee test")
+    assert jc._memory.get("name") == "Zee"
 
 
 def test_fact_block_roundtrip():
@@ -48,7 +48,7 @@ def test_fact_block_roundtrip():
 
 
 # ---------------- quick replies ----------------
-@pytest.mark.parametrize("msg", ["hi", "hey jarvis", "Hello!", "good morning", "what's up"])
+@pytest.mark.parametrize("msg", ["hi", "hey zee", "Hello!", "good morning", "what's up"])
 def test_quick_reply_greetings(msg):
     assert jc._quick_reply(msg)
 
@@ -171,7 +171,7 @@ def test_approval_approve_deny_flow(tmp_path, monkeypatch):
     pending = jc.request_approval("kill_process", {"name": "notepad", "junk": 1})
     assert pending["needs_approval"] is True
     # persisted to disk
-    assert json.loads((tmp_path / "pending_approvals.json").read_text(encoding="utf-8"))
+    assert json.loads((tmp_path / "zee_pending_approvals.json").read_text(encoding="utf-8"))
 
     result = jc.approve_action(pending["id"])
     assert result == {"killed": ["notepad"]}
@@ -195,12 +195,12 @@ def test_approval_expired():
 
 
 def test_approval_audit_log(tmp_path):
-    """Approval lifecycle events land in approvals.log as JSON lines."""
+    """Approval lifecycle events land in zee_approvals.log as JSON lines."""
     pending = jc.request_approval("kill_process", {"name": "notepad"}, actor="user1")
     jc.deny_action(pending["id"], actor="user1")
-    audit_file = tmp_path / "approvals.log"
+    audit_file = tmp_path / "zee_approvals.log"
     lines = [line for line in audit_file.read_text(encoding="utf-8").strip().splitlines() if line]
-    assert lines, "approvals.log should have at least one line"
+    assert lines, "zee_approvals.log should have at least one line"
     events = [json.loads(entry) for entry in lines]
     statuses = [ev["status"] for ev in events]
     assert "requested" in statuses and "denied" in statuses

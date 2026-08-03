@@ -1,12 +1,12 @@
-# JARVIS — Local Voice Assistant
+# ZEE — Local Voice Assistant
 
-A lightweight JARVIS-style assistant that runs **fully offline for speech** and uses a
+A lightweight ZEE-style assistant that runs **fully offline for speech** and uses a
 **local LLM (Ollama)** for its brain. It ships with two interfaces:
 
-1. **Web UI** (`app.py`) — a Stark-style browser interface with an animated arc
-   reactor. Use your browser's microphone or the text box, and JARVIS answers
+1. **Web UI** (`zee_api.py`) — a Stark-style browser interface with an animated arc
+   reactor. Use your browser's microphone or the text box, and ZEE answers
    out loud.
-2. **Voice loop** (`jarvis.py`) — hands-free desktop mode: wake JARVIS by saying
+2. **Voice loop** (`zee_voice.py`) — hands-free desktop mode: wake ZEE by saying
    its name, give voice commands, and it replies through your speakers.
 
 ## Features
@@ -16,7 +16,7 @@ A lightweight JARVIS-style assistant that runs **fully offline for speech** and 
 - 🧠 Local AI brain via **Ollama** (no cloud API needed)
 - ⚡ **Fast replies** — model kept warm in RAM, answers streamed to the screen
   token-by-token, audio starts playing while it's still downloading
-- 🛠️ **Function calling** — JARVIS can take real actions (see [Tools](#tools))
+- 🛠️ **Function calling** — ZEE can take real actions (see [Tools](#tools))
 - 🖥️ **PC control** — volume, media, brightness, screenshots, typing, folders
   (see [PC control](#pc-control))
 - 🛡️ **Approval gate** — destructive actions always ask for your OK first
@@ -66,8 +66,8 @@ pip install -r requirements.txt
 
 ```
 zee/
-├── app.py
-├── jarvis.py
+├── zee_api.py
+├── zee_voice.py
 └── model/          <- the unpacked Vosk model goes here
 ```
 
@@ -78,16 +78,16 @@ The Web UI does **not** need the Vosk model.
 ### Web UI
 
 ```sh
-python app.py
+python zee_api.py
 ```
 
-JARVIS serves **HTTPS by default** (self-signed cert, generated automatically)
+ZEE serves **HTTPS by default** (self-signed cert, generated automatically)
 so the microphone works from any device. Open **`https://192.168.1.4:5000`**
 (use your own IP), click **Advanced → Proceed to site** once, then click
 **Activate Microphone** to talk, or type a command and press Enter.
 
-> Plain HTTP (e.g. for localhost only): `set JARVIS_HTTPS=0` then
-> `python app.py`, open `http://localhost:5000`.
+> Plain HTTP (e.g. for localhost only): `set ZEE_HTTPS=0` then
+> `python zee_api.py`, open `http://localhost:5000`.
 >
 > `set FLASK_DEBUG=1` re-enables the auto-reloader for development.
 
@@ -97,29 +97,29 @@ Chrome only allows microphone access on secure origins (`https://` or
 `http://localhost`). HTTPS is already the default, so just use
 `https://YOUR_IP:5000`. If the page hangs instead of showing a certificate
 warning, an old server instance is still running — stop it (or use
-`start_jarvis.bat`, which handles that automatically).
+`start_zee.bat`, which handles that automatically).
 
 ### Authentication (web UI)
 
 The web API is protected with a **Bearer token** when exposed on the LAN:
 
-- Set `JARVIS_TOKEN=your-secret-token` before starting, **or** let JARVIS
-  generate one (saved to `.jarvis_token`, shown in the server console).
+- Set `ZEE_TOKEN=your-secret-token` before starting, **or** let ZEE
+  generate one (saved to `.zee_token`, shown in the server console).
 - The browser UI asks for the token once and stores it locally
   (`?token=YOUR_TOKEN` in the URL also works).
 - All POST endpoints (`/ask`, `/approve`, `/deny`) return `401` without it.
-- To disable auth (localhost only), set `JARVIS_TOKEN=none`.
+- To disable auth (localhost only), set `ZEE_TOKEN=none`.
 
-Rate limiting: `/ask` allows `JARVIS_RATE_LIMIT` requests/minute **per API
+Rate limiting: `/ask` allows `ZEE_RATE_LIMIT` requests/minute **per API
 token** (default 10; unauthenticated clients share a bucket per IP) and request
-bodies are capped at `JARVIS_MAX_BODY_KB` (default 16 KB). Oversized requests
+bodies are capped at `ZEE_MAX_BODY_KB` (default 16 KB). Oversized requests
 get `413`, rate-limited ones get `429`.
 
 ### Automation (opt-in)
 
 Discord messages/calls and Messenger/Facebook search open live apps and
 logged-in web sessions, so they are **off by default**. Set
-**`JARVIS_ALLOW_AUTOMATION=1`** to enable them:
+**`ZEE_ALLOW_AUTOMATION=1`** to enable them:
 
 | Tool | Behavior |
 | ---- | -------- |
@@ -130,15 +130,15 @@ logged-in web sessions, so they are **off by default**. Set
 Inputs are strictly validated before any subprocess/URL is built (`; & | ` $`
 and control characters are rejected) and every action is written to the
 approval log. Without the flag all of these return an error telling you to set
-`JARVIS_ALLOW_AUTOMATION=1`.
+`ZEE_ALLOW_AUTOMATION=1`.
 
 ### Diagnostics
 
-`python jarvis_core.py --doctor` prints a health report (dependencies,
+`python zee_core.py --doctor` prints a health report (dependencies,
 Ollama + model availability, audio, Vosk model, automation flag) and exits
-nonzero when critical pieces are missing. `app.py` and `jarvis.py` log the
-same report at startup. Server logs rotate in `jarvis.log`
-(`JARVIS_LOG_FILE`).
+nonzero when critical pieces are missing. `zee_api.py` and `zee_voice.py` log the
+same report at startup. Server logs rotate in `zee.log`
+(`ZEE_LOG_FILE`).
 
 ### Health endpoint
 
@@ -153,23 +153,23 @@ reachable, `503` otherwise:
 
 Useful for uptime monitors or restart scripts. Not behind the token (it only
 reveals availability); if you don't want it exposed, block it in your
-firewall or set `JARVIS_TOKEN` and ignore it.
+firewall or set `ZEE_TOKEN` and ignore it.
 
 ### Desktop voice loop
 
 ```sh
-python jarvis.py
+python zee_voice.py
 ```
 
-Say **"JARVIS"** to get its attention, then:
+Say **"ZEE"** to get its attention, then:
 
-- `jarvis open notepad` / `jarvis open calculator` / `jarvis open browser`
-- `jarvis what time is it` — any conversation goes to the Ollama brain
-- `jarvis stop` / `exit` / `shutdown` — quit
+- `zee open notepad` / `zee open calculator` / `zee open browser`
+- `zee what time is it` — any conversation goes to the Ollama brain
+- `zee stop` / `exit` / `shutdown` — quit
 
 ## Tools
 
-JARVIS can call tools through the LLM's function-calling support. It will use
+ZEE can call tools through the LLM's function-calling support. It will use
 them automatically when they help, then summarise the result. Requires a
 tool-capable model (see [Requirements](#requirements)).
 
@@ -179,7 +179,7 @@ tool-capable model (see [Requirements](#requirements)).
 | `get_location`   | Where the PC is (IP geolocation, or your stated location) |
 | `open_app`       | Launch **any installed app** (found via Start Menu/Desktop shortcuts: discord, steam, spotify, chrome…) or a website (youtube, google, gmail…) |
 | `open_file`      | Find a file by name (Documents/Downloads/Desktop/Pictures) and open it |
-| `read_notes`     | Read back your saved notes (`notes.txt`)            |
+| `read_notes`     | Read back your saved notes (`zee_notes.txt`)            |
 | `list_processes` | What's running right now, most CPU-hungry first     |
 | `set_reminder`   | Speak a reminder after a duration ("remind me in 20 minutes…") |
 | `discord_contact`| Find a Discord user and open their DM (desktop app) |
@@ -187,9 +187,9 @@ tool-capable model (see [Requirements](#requirements)).
 | `system_info`    | CPU, RAM and battery usage                          |
 | `web_search`     | Web search (Wikipedia API, no key needed)           |
 | `get_weather`    | Current weather for any city (Open-Meteo, no key)   |
-| `create_note`    | Append a note to `notes.txt`                        |
+| `create_note`    | Append a note to `zee_notes.txt`                        |
 
-If your model doesn't support tools, JARVIS automatically falls back to plain
+If your model doesn't support tools, ZEE automatically falls back to plain
 chat — the tools are simply skipped. `web_search` and `get_weather` need an
 internet connection.
 
@@ -199,7 +199,7 @@ internet connection.
 > Linux/macOS (via `xdg-open`/`open`); `kill_process` works anywhere
 > (psutil). Tools that can't run on your platform return a clear error
 > instead of crashing. Windows-only code lives in `win_control.py` so the
-> core (`jarvis_core.py`) stays cross-platform.
+> core (`zee_core.py`) stays cross-platform.
 > Requires `pycaw` (volume) and `Pillow` (screenshots), which are in
 > `requirements.txt`.
 
@@ -218,18 +218,18 @@ internet connection.
 ### Approval gate (safety)
 
 `kill_process` and `system_action` (marked ⚠️) **never run automatically**.
-JARVIS first asks for your permission and executes the action only after you
+ZEE first asks for your permission and executes the action only after you
 confirm:
 
 - **Web UI** — a red-tinted *AUTHORIZATION REQUIRED* dialog with **Approve /
   Cancel** buttons appears.
-- **Voice loop** — JARVIS asks *"Do you want me to…"* and waits for you to say
+- **Voice loop** — ZEE asks *"Do you want me to…"* and waits for you to say
   *"yes"* or *"no"*.
 
-Pending approvals expire after 2 minutes (`JARVIS_APPROVAL_TTL`), are
-**persisted to disk** (`pending_approvals.json`, survives restarts), and can
+Pending approvals expire after 2 minutes (`ZEE_APPROVAL_TTL`), are
+**persisted to disk** (`zee_pending_approvals.json`, survives restarts), and can
 **never be replayed** — each approval id works exactly once. Every request,
-approval and denial is written in JSON-lines format to `approvals.log` with
+approval and denial is written in JSON-lines format to `zee_approvals.log` with
 `timestamp / id / action / args / expires / status / actor` (web calls are
 attributed to `web`, the voice loop to `voice`). System-critical
 processes (explorer, svchost, lsass, etc.) are always refused even when
@@ -250,28 +250,28 @@ Set any of these environment variables before running:
 | Variable              | Default                  | Description                                 |
 | --------------------- | ------------------------ | ------------------------------------------- |
 | `OLLAMA_MODEL`        | `llama3.2:latest`        | Ollama model used for answers/tools         |
-| `JARVIS_VOICE`        | `en-US-ChristopherNeural`| edge-tts voice (see `edge-tts --list`)      |
-| `JARVIS_RATE`         | `+10%`                   | Speech speed adjustment                     |
-| `JARVIS_MAX_TOKENS`   | `150`                    | Max reply length — lower = faster answers   |
-| `JARVIS_TEMPERATURE`  | `0.7`                    | Model creativity                            |
-| `JARVIS_NUM_CTX`      | `4096`                   | Context window — lower = less VRAM, faster  |
-| `JARVIS_KEEP_ALIVE`   | `30m`                    | How long the model stays loaded in RAM      |
-| `JARVIS_HTTPS`        | `1`                      | Serve over HTTPS with a self-signed cert (`app.py`) |
-| `FLASK_DEBUG`         | `0`                      | Flask auto-reloader on/off (`app.py`)       |
-| `JARVIS_TOKEN`        | *(generated)*            | Web UI auth token; `none` disables auth     |
-| `JARVIS_RATE_LIMIT`   | `10`                     | `/ask` requests per minute per API token    |
-| `JARVIS_MAX_BODY_KB`  | `16`                     | Max JSON request body size (`/ask` etc.)    |
-| `JARVIS_APPROVAL_TTL` | `120`                    | Seconds before a pending approval expires   |
-| `JARVIS_ALLOW_AUTOMATION` | `0`                  | Set `1` to enable Discord/Messenger automation |
-| `JARVIS_LOG_LEVEL`    | `INFO`                   | Log verbosity (`DEBUG`, `INFO`, `WARNING`…) |
-| `JARVIS_LOG_FILE`     | *(console only)*         | Optional log file path                      |
+| `ZEE_VOICE`        | `en-US-ChristopherNeural`| edge-tts voice (see `edge-tts --list`)      |
+| `ZEE_RATE`         | `+10%`                   | Speech speed adjustment                     |
+| `ZEE_MAX_TOKENS`   | `150`                    | Max reply length — lower = faster answers   |
+| `ZEE_TEMPERATURE`  | `0.7`                    | Model creativity                            |
+| `ZEE_NUM_CTX`      | `4096`                   | Context window — lower = less VRAM, faster  |
+| `ZEE_KEEP_ALIVE`   | `30m`                    | How long the model stays loaded in RAM      |
+| `ZEE_HTTPS`        | `1`                      | Serve over HTTPS with a self-signed cert (`zee_api.py`) |
+| `FLASK_DEBUG`         | `0`                      | Flask auto-reloader on/off (`zee_api.py`)       |
+| `ZEE_TOKEN`        | *(generated)*            | Web UI auth token; `none` disables auth     |
+| `ZEE_RATE_LIMIT`   | `10`                     | `/ask` requests per minute per API token    |
+| `ZEE_MAX_BODY_KB`  | `16`                     | Max JSON request body size (`/ask` etc.)    |
+| `ZEE_APPROVAL_TTL` | `120`                    | Seconds before a pending approval expires   |
+| `ZEE_ALLOW_AUTOMATION` | `0`                  | Set `1` to enable Discord/Messenger automation |
+| `ZEE_LOG_LEVEL`    | `INFO`                   | Log verbosity (`DEBUG`, `INFO`, `WARNING`…) |
+| `ZEE_LOG_FILE`     | *(console only)*         | Optional log file path                      |
 
 ## Logging
 
-All modules log through a shared `jarvis` logger with levels and timestamps
-(no scattered `print()` calls). Set `JARVIS_LOG_LEVEL=DEBUG` for verbose
-tool/trace output. `JARVIS_LOG_FILE=jarvis.log` (default) writes to a file
-that **rotates** at 1 MB (3 backups); set `JARVIS_LOG_FILE=` for console only.
+All modules log through a shared `zee` logger with levels and timestamps
+(no scattered `print()` calls). Set `ZEE_LOG_LEVEL=DEBUG` for verbose
+tool/trace output. `ZEE_LOG_FILE=zee.log` (default) writes to a file
+that **rotates** at 1 MB (3 backups); set `ZEE_LOG_FILE=` for console only.
 
 ## Development
 
@@ -288,14 +288,14 @@ and the `--doctor` report.
 ## How fast replies work
 
 1. On startup, the model is **preloaded in the background** and kept in memory
-   (`JARVIS_KEEP_ALIVE`), so the first question isn't a cold start.
+   (`ZEE_KEEP_ALIVE`), so the first question isn't a cold start.
 2. While the model thinks, the web UI shows a status line; answers then
    **stream token-by-token** into the log instead of appearing all at once.
 3. Once the reply is complete, the audio file is generated and played —
-   so JARVIS talks right after the text appears.
-4. Replies are capped at `JARVIS_MAX_TOKENS` so JARVIS gets to the point.
+   so ZEE talks right after the text appears.
+4. Replies are capped at `ZEE_MAX_TOKENS` so ZEE gets to the point.
 
-If your model doesn't support tools, JARVIS automatically falls back to plain
+If your model doesn't support tools, ZEE automatically falls back to plain
 chat — the tools are simply skipped. `web_search` and `get_weather` need an
 internet connection.
 
@@ -304,42 +304,42 @@ internet connection.
 `discord_contact` and `discord_call` drive **your own Discord desktop app**
 (like you typing yourself — no bot, nothing against Discord's terms):
 
-1. Discord must be running and logged in (JARVIS launches it if not).
+1. Discord must be running and logged in (ZEE launches it if not).
 2. `discord_contact` opens the quick switcher (Ctrl+K), types the name and
    opens the DM.
 3. `discord_call` does the same, then clicks the **Start Voice Call** button;
    if Discord doesn't expose the button to automation, it presses a hotkey
    instead. For the most reliable calls, set a keybind in
    Discord → Settings → Keybinds → **Start/Stop Voice Call** (e.g. `Ctrl+F10`)
-   and set `JARVIS_DISCORD_CALL_KEY=^F10` (SendKeys syntax) before starting.
+   and set `ZEE_DISCORD_CALL_KEY=^F10` (SendKeys syntax) before starting.
    Voice loop: "call <name> on discord", web UI: "call <name> on discord".
 
 ## Memory
 
-- JARVIS **remembers the last few turns** of conversation, so it can follow up
+- ZEE **remembers the last few turns** of conversation, so it can follow up
   ("you mentioned earlier that you're in Batangas…").
 - Facts it learns from you — your **name** ("call me Ron", "my name is …") and
   your **stated location** ("I'm in Batangas", "I live in …") — are saved to
-  `memory.json` and remembered across restarts. A stated location always wins
+  `zee_memory.json` and remembered across restarts. A stated location always wins
   over IP geolocation.
-- Delete `memory.json` to wipe what it remembers.
-- Greetings ("hi", "hey jarvis"…) get an instant canned reply without touching
+- Delete `zee_memory.json` to wipe what it remembers.
+- Greetings ("hi", "hey zee"…) get an instant canned reply without touching
   the model.
-- JARVIS refuses to run tools you didn't ask for (e.g. it won't change the
+- ZEE refuses to run tools you didn't ask for (e.g. it won't change the
   volume unless you mention volume), even if the model proposes it.
 
 ## Project layout
 
 ```
 zee/
-├── app.py            # Flask web server + /ask API (auth, rate limits)
-├── jarvis.py         # Offline voice loop (Vosk + sounddevice)
-├── jarvis_core.py    # Shared TTS + Ollama brain + approvals + doctor (cross-platform)
+├── zee_api.py            # Flask web server + /ask API (auth, rate limits)
+├── zee_voice.py         # Offline voice loop (Vosk + sounddevice)
+├── zee_core.py    # Shared TTS + Ollama brain + approvals + doctor (cross-platform)
 ├── win_control.py    # Windows-only PC-control tools (apps, volume, Discord…)
 ├── templates/
 │   └── index.html    # Browser UI
 ├── tests/            # Unit + web tests (pytest)
-├── approvals.log    # Approval audit log (JSON lines, generated)
+├── zee_approvals.log # Approval audit log (JSON lines, generated)
 └── model/            # Vosk model (download, not included)
 ```
 
@@ -347,15 +347,15 @@ zee/
 
 - **"Ollama error" / "trouble connecting to my cognitive processor"** — make
   sure `ollama serve` is running and `ollama list` shows the model named in
-  `OLLAMA_MODEL`. Run `python jarvis_core.py --doctor` for a full report.
-- **`401 Unauthorized` in the web UI** — set the same `JARVIS_TOKEN` on the
+  `OLLAMA_MODEL`. Run `python zee_core.py --doctor` for a full report.
+- **`401 Unauthorized` in the web UI** — set the same `ZEE_TOKEN` on the
   server, or open the page with `?token=YOUR_TOKEN`.
 - **No sound** — the audio device may be busy; try closing apps using the
-  speakers, or set `JARVIS_VOICE`/`JARVIS_RATE` to tweak TTS.
+  speakers, or set `ZEE_VOICE`/`ZEE_RATE` to tweak TTS.
 - **Microphone not working in the browser** — Chrome blocks the mic on plain
-  HTTP. Use `http://localhost:5000`, or enable HTTPS with `JARVIS_HTTPS=1`
+  HTTP. Use `http://localhost:5000`, or enable HTTPS with `ZEE_HTTPS=1`
   (see [Using the microphone](#using-the-microphone-from-another-device-or-a-lan-ip)).
-- **Tools don't run (JARVIS answers normally)** — your model doesn't support
+- **Tools don't run (ZEE answers normally)** — your model doesn't support
   function calling. Pull a tool-capable one: `ollama pull llama3.1` and set
   `OLLAMA_MODEL=llama3.1`.
 - **`vosk.Model` not found** — download a model and place it in the `model/`

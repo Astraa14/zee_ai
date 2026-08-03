@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ZEE
+Comment=Local voice assistant
+Exec=zee start
+Icon=accessories-text-editor
+Terminal=false
+Categories=Utility;

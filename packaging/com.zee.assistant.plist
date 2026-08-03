@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- macOS LaunchAgent template for the ZEE daemon.
+     Copy to ~/Library/LaunchAgents/com.zee.assistant.plist, adjust paths,
+     then: launchctl load ~/Library/LaunchAgents/com.zee.assistant.plist
+     (install_autostart.py generates this automatically.) -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.zee.assistant</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/python3</string>
+        <string>/Users/YOU/zee/zee.py</string>
+        <string>daemon</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/YOU/zee</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/Users/YOU/.zee/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOU/.zee/launchd.err.log</string>
+</dict>
+</plist>

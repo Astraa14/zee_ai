@@ -1,3 +1,11 @@
+"""ZEE offline voice loop (Vosk + sounddevice).
+
+Run standalone (``python zee_voice.py``) or as part of the daemon via
+:func:`run_voice_loop` (``zee daemon`` / ``zee start``).
+
+When the wake word "zee" is heard the loop broadcasts a ``wake`` event on the
+SSE channel (``/events``) so the desktop GUI can raise itself.
+"""
 import json
 import os
 import queue
@@ -7,11 +15,17 @@ import threading
 
 import sounddevice as sd
 
-import jarvis_core
-from jarvis_core import log
+import events
+import zee_core
+from zee_core import log
 
 q = queue.Queue()
 is_speaking = False
+
+# Wake words: "zee" (and the truncated "zi" that Vosk often transcribes).
+_WAKE_RE = re.compile(r"\b(zee|zi|z)\b", re.IGNORECASE)
+_APPROVAL_WORDS = ("yes", "approve", "ok", "okay", "sure",
+                   "go ahead", "do it", "confirm", "allowed")
 
 
 def speak(text):
@@ -20,12 +34,17 @@ def speak(text):
     # Cover ears so the microphone ignores our own voice
     is_speaking = True
     try:
-        jarvis_core.speak(text, wait=True)
+        zee_core.speak(text, wait=True)
     finally:
         # Empty the queue of any echoes
         while not q.empty():
             q.get()
         is_speaking = False
+
+
+def is_wake_word(text):
+    """True when the user said the assistant's name (case-insensitive)."""
+    return bool(_WAKE_RE.search(text or ""))
 
 
 def open_application(command):
@@ -37,7 +56,7 @@ def open_application(command):
     name = m.group(1).strip() if m else None
     if not name:
         return False
-    result = jarvis_core.run_tool("open_app", {"app": name}, actor="voice")
+    result = zee_core.run_tool("open_app", {"app": name}, actor="voice")
     if result.get("opened") or result.get("opened_website"):
         speak(f"Opening {name}.")
         return True
@@ -47,7 +66,7 @@ def open_application(command):
 def handle_brain(text):
     """Ask the Ollama brain. Returns a pending approval dict, or None."""
     try:
-        answer = jarvis_core.ask_ollama(text, actor="voice")
+        answer = zee_core.ask_ollama(text, actor="voice")
     except Exception as e:
         speak("I'm sorry, I am having trouble connecting "
               "to my cognitive processor.")
@@ -61,12 +80,21 @@ def handle_brain(text):
     return None
 
 
+def _broadcast_wake(text):
+    import time
+    events.broadcast({
+        "type": "wake",
+        "phrase": text,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    })
+
+
 def audio_callback(indata, frames, time, status):
     global is_speaking
     if status:
         log.warning(f"Audio status: {status}")
 
-    # Only save the audio if JARVIS is NOT currently speaking
+    # Only save the audio if ZEE is NOT currently speaking
     if not is_speaking:
         q.put(bytes(indata))
 
@@ -77,7 +105,7 @@ def _check_vosk_model():
         log.error(
             "Vosk model not found. Download one from "
             "https://alphacephei.com/vosk/models and unpack it as 'model' "
-            "in the current folder. The web UI (app.py) does NOT need it."
+            "in the current folder. The web UI (zee_api.py) does NOT need it."
         )
         sys.exit(1)
 
@@ -93,8 +121,13 @@ def _check_sound_device():
         return False
 
 
-def main():
-    log.info("Starting JARVIS voice loop...")
+def run_voice_loop():
+    """Background-able entry point: blocks listening for the wake word.
+
+    Broadcasts a ``wake`` SSE event whenever "zee" is heard, so a connected
+    GUI can raise itself. Returns when the user says stop/exit/shutdown.
+    """
+    log.info("Starting ZEE voice loop...")
 
     _check_vosk_model()
     import vosk
@@ -104,18 +137,18 @@ def main():
 
     # Diagnostics: warn (don't stop) if Ollama or the model is missing —
     # the brain fails gracefully per request, but the user should know.
-    if not jarvis_core.check_ollama():
+    if not zee_core.check_ollama():
         log.error("Ollama server is not reachable. Start it with 'ollama serve' "
-                  "and pull the model first: ollama pull " + jarvis_core.OLLAMA_MODEL)
+                  "and pull the model first: ollama pull " + zee_core.OLLAMA_MODEL)
 
     model = vosk.Model("model")
     samplerate = 16000
     pending_approval = None
 
     # Audio must be initialized in the main thread before any speech threads.
-    jarvis_core.init_audio()
+    zee_core.init_audio()
     # Preload the model so the first question isn't slow.
-    threading.Thread(target=jarvis_core.warmup_model, daemon=True).start()
+    threading.Thread(target=zee_core.warmup_model, daemon=True).start()
 
     with sd.RawInputStream(samplerate=samplerate, blocksize=8000, dtype='int16',
                            channels=1, callback=audio_callback):
@@ -136,17 +169,17 @@ def main():
 
                 # A dangerous action is awaiting a yes/no answer
                 if pending_approval is not None:
-                    if any(word in text for word in
-                           ("yes", "approve", "ok", "okay", "sure", "go ahead", "do it", "confirm", "allowed")):
-                        jarvis_core.approve_action(pending_approval["id"], actor="voice")
+                    if any(word in text for word in _APPROVAL_WORDS):
+                        zee_core.approve_action(pending_approval["id"], actor="voice")
                         speak("Approved.")
                     else:
-                        jarvis_core.deny_action(pending_approval["id"], actor="voice")
+                        zee_core.deny_action(pending_approval["id"], actor="voice")
                         speak("Cancelled.")
                     pending_approval = None
                     continue
 
-                if "jarvis" in text:
+                if is_wake_word(text):
+                    _broadcast_wake(text)
                     speak("Yes, sir?")
                 elif "open" in text:
                     if not open_application(text):
@@ -158,8 +191,12 @@ def main():
                     pending_approval = handle_brain(text)
 
 
-if __name__ == "__main__":
+def main():
     try:
-        main()
+        run_voice_loop()
     except KeyboardInterrupt:
         log.info("Program stopped manually.")
+
+
+if __name__ == "__main__":
+    main()

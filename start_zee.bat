@@ -1,9 +1,9 @@
 @echo off
-title JARVIS - Local Assistant
+title ZEE - Local Assistant
 cd /d "%~dp0"
 
 echo ============================================
-echo   JARVIS launcher
+echo   ZEE launcher
 echo ============================================
 
 REM --- Kill any stale server still holding port 5000 ---
@@ -12,6 +12,6 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr :5000 ^| findstr LISTENING') 
     taskkill /F /PID %%a >nul 2>&1
 )
 
-REM --- Start JARVIS (HTTPS is on by default) ---
-python app.py
+REM --- Start ZEE (HTTPS is on by default) ---
+python zee.py start
 pause

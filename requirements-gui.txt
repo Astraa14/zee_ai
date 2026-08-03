@@ -1,0 +1,3 @@
+# GUI dependencies (zee gui / zee start)
+PySide6>=6.5
+PySide6-WebEngine>=6.5

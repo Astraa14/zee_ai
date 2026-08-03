@@ -12,13 +12,14 @@ from datetime import datetime, timedelta, timezone
 
 from flask import Flask, Response, render_template, request, jsonify
 
-import jarvis_core
-from jarvis_core import log
+import events
+import zee_core
+from zee_core import log
 
 app = Flask(__name__)
 
 # Global cap on request bodies (applies to /ask, /approve, /deny).
-app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("JARVIS_MAX_BODY_KB", "16")) * 1024
+app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("ZEE_MAX_BODY_KB", "16")) * 1024
 
 CERT_FILE = os.path.join(os.path.dirname(__file__), "cert.pem")
 KEY_FILE = os.path.join(os.path.dirname(__file__), "key.pem")
@@ -27,19 +28,19 @@ MAX_TEXT_LEN = 2000
 _APPROVAL_ID_RE = re.compile(r"[0-9a-f]{8,64}")
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
 
-jarvis_core.setup_logging()
+zee_core.setup_logging()
 
 # ---------------- Authentication (Bearer token) ----------------
-TOKEN_FILE = os.path.join(os.path.dirname(__file__), ".jarvis_token")
+TOKEN_FILE = os.path.join(os.path.dirname(__file__), ".zee_token")
 
 
 def _get_token():
-    """Return the auth token from JARVIS_TOKEN env, or the token file.
+    """Return the auth token from ZEE_TOKEN env, or the token file.
 
-    If neither exists, generate one, persist it to .jarvis_token and
-    return it. Set JARVIS_TOKEN=none to disable authentication entirely.
+    If neither exists, generate one, persist it to .zee_token and
+    return it. Set ZEE_TOKEN=none to disable authentication entirely.
     """
-    env = os.getenv("JARVIS_TOKEN")
+    env = os.getenv("ZEE_TOKEN")
     if env is not None:
         return env.strip() or None  # empty string → auth disabled
     try:
@@ -65,7 +66,7 @@ _token = _get_token()
 def _authorized():
     if not _token:
         return True
-    given = request.headers.get("X-JARVIS-Token", "")
+    given = request.headers.get("X-ZEE-TOKEN", "")
     header = request.headers.get("Authorization", "")
     if header.startswith("Bearer "):
         given = header[7:]
@@ -74,7 +75,7 @@ def _authorized():
 
 @app.before_request
 def _require_auth():
-    if request.method == "POST" and request.path in ("/ask", "/approve", "/deny"):
+    if request.method == "POST" and request.path in ("/ask", "/approve", "/deny", "/shutdown"):
         if not _authorized():
             return jsonify({"error": "Unauthorized. Provide a valid access token."}), 401
 
@@ -101,13 +102,13 @@ class _RateLimiter:
             return True
 
 
-RATE_LIMIT_PER_MIN = int(os.getenv("JARVIS_RATE_LIMIT", "10"))
+RATE_LIMIT_PER_MIN = int(os.getenv("ZEE_RATE_LIMIT", "10"))
 _ask_limiter = _RateLimiter(RATE_LIMIT_PER_MIN, 60)
 
 
 def _client_key():
     """Rate-limit bucket key: per authenticated token (hashed), else per IP."""
-    given = request.headers.get("X-JARVIS-Token", "")
+    given = request.headers.get("X-ZEE-TOKEN", "")
     header = request.headers.get("Authorization", "")
     if header.startswith("Bearer "):
         given = header[7:]
@@ -142,7 +143,7 @@ def ensure_cert():
     from cryptography.x509.oid import NameOID
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "jarvis.local")])
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "zee.local")])
     alt_names = [
         x509.DNSName("localhost"),
         x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
@@ -174,17 +175,17 @@ def _stream_reply(text, actor="web"):
     """Generator: yields NDJSON lines (delta / approval / done) as the model replies."""
     log.info(f"[ask] text={text!r} actor={actor}")
     try:
-        stream = jarvis_core.StreamAsk(text, actor=actor)
+        stream = zee_core.StreamAsk(text, actor=actor)
         for delta in stream:
             yield json.dumps({"delta": delta}) + "\n"
         if stream.approval:
-            jarvis_core.speak(stream.full_text + " Please approve or cancel on the screen.")
+            zee_core.speak(stream.full_text + " Please approve or cancel on the screen.")
             yield json.dumps({
                 "approval_id": stream.approval["id"],
                 "approval_message": stream.approval["message"],
             }) + "\n"
         else:
-            jarvis_core.speak(stream.full_text)
+            zee_core.speak(stream.full_text)
     except Exception as e:
         log.error(f"Ollama error: {e}")
         msg = "I am having trouble connecting to my cognitive processor."
@@ -204,11 +205,11 @@ def health():
     Returns 200 when the brain can answer questions, 503 otherwise.
     Audio is reported but does not gate readiness (TTS is best-effort).
     """
-    ollama_ok = jarvis_core.check_ollama()
+    ollama_ok = zee_core.check_ollama()
     model_ok = False
     if ollama_ok:
         try:
-            jarvis_core.ollama.show(jarvis_core.OLLAMA_MODEL)
+            zee_core.ollama.show(zee_core.OLLAMA_MODEL)
             model_ok = True
         except Exception:
             model_ok = False
@@ -217,13 +218,37 @@ def health():
         "status": "ok" if ready else "degraded",
         "ready": ready,
         "ollama": ollama_ok,
-        "ollama_detail": jarvis_core.ollama_probe(),
-        "automation_enabled": jarvis_core.automation_enabled(),
+        "ollama_detail": zee_core.ollama_probe(),
+        "automation_enabled": zee_core.automation_enabled(),
         "model_available": model_ok,
-        "audio": jarvis_core.init_audio(),
-        "model": jarvis_core.OLLAMA_MODEL,
+        "audio": zee_core.init_audio(),
+        "model": zee_core.OLLAMA_MODEL,
     }
     return jsonify(payload), (200 if ready else 503)
+
+
+@app.route("/events")
+def events_route():
+    """Server-Sent Events stream: wake events, approval requests, daemon state."""
+    return events.stream_events_response()
+
+
+@app.route("/shutdown", methods=["POST"])
+def shutdown():
+    """Stop the daemon gracefully. Protected by the same token as /ask."""
+    log.warning("Shutdown requested via /shutdown")
+    func = request.environ.get("werkzeug.server.shutdown")
+    if func:
+        func()
+    else:
+        threading.Thread(target=_force_stop, daemon=True).start()
+    return jsonify({"ok": True, "message": "ZEE daemon stopping."})
+
+
+def _force_stop():
+    time.sleep(0.5)
+    log.info("ZEE daemon exiting.")
+    os._exit(0)
 
 
 @app.route("/ask", methods=["POST"])
@@ -244,10 +269,10 @@ def ask():
 
     m = re.fullmatch(r"open\s+(?:the\s+|a\s+)?(.{1,40})", text)
     if m and not re.search(r"(where|what|how|why|when|about|with|help|door|window)", m.group(1)):
-        result = jarvis_core.run_tool("open_app", {"app": m.group(1)}, actor="web")
+        result = zee_core.run_tool("open_app", {"app": m.group(1)}, actor="web")
         if result.get("opened") or result.get("opened_website"):
             reply = f"Opening {m.group(1).title()}."
-            jarvis_core.speak(reply)
+            zee_core.speak(reply)
             return Response(
                 json.dumps({"delta": reply}) + "\n" + json.dumps({"done": True}) + "\n",
                 mimetype="application/x-ndjson",
@@ -267,11 +292,11 @@ def approve():
     action_id = _valid_approval_id(data)
     if not action_id:
         return jsonify({"error": "Invalid approval_id."}), 400
-    result = jarvis_core.approve_action(action_id, actor="web")
+    result = zee_core.approve_action(action_id, actor="web")
     if "error" in result:
         return jsonify({"ok": False, "message": result["error"]}), 400
     message = _describe_result(result)
-    jarvis_core.speak("Approved. " + message)
+    zee_core.speak("Approved. " + message)
     return jsonify({"ok": True, "message": message})
 
 
@@ -281,8 +306,8 @@ def deny():
     action_id = _valid_approval_id(data)
     if not action_id:
         return jsonify({"error": "Invalid approval_id."}), 400
-    jarvis_core.deny_action(action_id, actor="web")
-    jarvis_core.speak("Cancelled.")
+    zee_core.deny_action(action_id, actor="web")
+    zee_core.speak("Cancelled.")
     return jsonify({"ok": True, "message": "Action cancelled."})
 
 
@@ -294,29 +319,30 @@ def _describe_result(result):
     return "Done."
 
 
-if __name__ == "__main__":
-    report = jarvis_core.doctor()
-    for line in jarvis_core.doctor_summary(report):
+def run_server():
+    """Serve the API (blocking). Initializes audio + warmup like the web app."""
+    report = zee_core.doctor()
+    for line in zee_core.doctor_summary(report):
         log.info(f"[doctor] {line}")
     if not report["healthy"]:
         log.error("Environment problems detected — see [doctor] lines above.")
 
     # Audio must be initialized in the main thread before any speech threads.
-    jarvis_core.init_audio()
+    zee_core.init_audio()
     # Preload the model in the background so the first question is fast.
-    threading.Thread(target=jarvis_core.warmup_model, daemon=True).start()
+    threading.Thread(target=zee_core.warmup_model, daemon=True).start()
     debug = os.getenv("FLASK_DEBUG", "0") == "1"
 
     if _token:
-        log.info(f"Web UI auth token: {_token}  (set JARVIS_TOKEN to change, "
-                 "JARVIS_TOKEN=none to disable)")
+        log.info(f"Web UI auth token: {_token}  (set ZEE_TOKEN to change, "
+                 "ZEE_TOKEN=none to disable)")
     else:
-        log.warning("Authentication is DISABLED (JARVIS_TOKEN=none).")
+        log.warning("Authentication is DISABLED (ZEE_TOKEN=none).")
 
     kwargs = {"host": "0.0.0.0", "port": 5000, "debug": debug}
     # HTTPS is on by default so the microphone works over the LAN.
-    # Set JARVIS_HTTPS=0 to serve plain HTTP instead.
-    if os.getenv("JARVIS_HTTPS", "1") == "1":
+    # Set ZEE_HTTPS=0 to serve plain HTTP instead.
+    if os.getenv("ZEE_HTTPS", "1") == "1":
         try:
             ensure_cert()
             kwargs["ssl_context"] = (CERT_FILE, KEY_FILE)
@@ -325,3 +351,7 @@ if __name__ == "__main__":
         except Exception as e:
             log.error(f"HTTPS unavailable ({e}); falling back to plain HTTP.")
     app.run(**kwargs)
+
+
+if __name__ == "__main__":
+    run_server()

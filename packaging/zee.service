@@ -1,0 +1,15 @@
+[Unit]
+Description=ZEE local assistant daemon
+After=network.target sound.target
+
+[Service]
+Type=simple
+# Replace <USER> with your user; run from the checkout directory.
+WorkingDirectory=/home/<USER>/zee
+ExecStart=/usr/bin/python3 /home/<USER>/zee/zee.py daemon
+Restart=on-failure
+RestartSec=5
+Environment=ZEE_HTTPS=1
+
+[Install]
+WantedBy=default.target
