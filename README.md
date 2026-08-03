@@ -91,6 +91,29 @@ so the microphone works from any device. Open **`https://192.168.1.4:5000`**
 >
 > `set FLASK_DEBUG=1` re-enables the auto-reloader for development.
 
+### Desktop app (GUI + daemon)
+
+`zee.py` is the desktop entry point. It runs the API + voice loop as a
+background **daemon**, and optionally raises a small **PySide6 tray app** that
+embeds the web UI:
+
+```sh
+pip install -r requirements-gui.txt      # optional: GUI needs PySide6 + WebEngine
+
+python zee.py daemon          # background service: API + voice loop, no window
+python zee.py gui             # GUI only (daemon must already be running)
+python zee.py start           # start the daemon in the background, then open the GUI
+python zee.py stop            # stop the daemon (POST /shutdown, token-protected)
+python zee.py install-autostart [--gui]  # register ZEE to start at login
+```
+
+- The GUI lives in the system tray; closing the window keeps the daemon
+  running. Wake events and approval requests arrive over the **SSE `/events`**
+  stream (`retry: 2000`, `data: <json>` frames) and raise the window.
+- Settings (`~/.zee/zee.conf`, `KEY=VALUE` lines) apply on the next daemon
+  restart.
+- `start_zee.bat` runs `python zee.py start` on Windows.
+
 #### Using the microphone from another device (or a LAN IP)
 
 Chrome only allows microphone access on secure origins (`https://` or
@@ -107,7 +130,8 @@ The web API is protected with a **Bearer token** when exposed on the LAN:
   generate one (saved to `.zee_token`, shown in the server console).
 - The browser UI asks for the token once and stores it locally
   (`?token=YOUR_TOKEN` in the URL also works).
-- All POST endpoints (`/ask`, `/approve`, `/deny`) return `401` without it.
+- All POST endpoints (`/ask`, `/approve`, `/deny`, `/shutdown`) return `401`
+  without it.
 - To disable auth (localhost only), set `ZEE_TOKEN=none`.
 
 Rate limiting: `/ask` allows `ZEE_RATE_LIMIT` requests/minute **per API
