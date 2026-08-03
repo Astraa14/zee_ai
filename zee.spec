@@ -1,16 +1,24 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec for the ZEE launcher. Build with:
-#   pip install pyinstaller
-#   pyinstaller zee.spec
-# The bundle excludes the Vosk model (large); place it as "model/" next to
-# the built executable — the daemon refuses to start the voice loop without it.
+# PyInstaller spec for the ZEE desktop app (onedir).
+#
+#   pip install -r requirements-dev.txt
+#   pip install -r requirements-gui.txt      # PySide6, needed to bundle the GUI
+#   pyinstaller --noconfirm --clean zee.spec
+#
+# Output: dist/Zee/Zee.exe (onedir). The installer (scripts/make_installer.iss)
+# packs that folder. The Vosk model is NOT bundled (hundreds of MB) — after
+# install, drop it in %APPDATA%\Zee\model (see docs/packaging_windows.md).
+#
+# PySide6 + QtWebEngine ship their own PyInstaller hooks, which collect
+# QtWebEngineProcess.exe and its resources automatically.
 from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
 
 hiddenimports = (
     collect_submodules("flask")
-    + ["zee_core", "zee_voice", "zee_api", "events", "win_control", "tools.install_autostart"]
+    + ["zee_core", "zee_voice", "zee_api", "events", "win_control",
+       "apppaths", "tokenstore", "tools.install_autostart"]
 )
 
 datas = [
@@ -26,7 +34,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["matplotlib", "PySide6", "PyQt5"],
+    excludes=["PyQt5", "matplotlib", "tkinter"],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -37,15 +45,13 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="Zee",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,  # daemon/GUI run without a console window
@@ -55,4 +61,15 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="Zee",
 )

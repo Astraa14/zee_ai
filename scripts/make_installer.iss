@@ -1,8 +1,9 @@
-; Inno Setup script for ZEE — build with the Inno Setup compiler:
+; Inno Setup script for ZEE — compile with the Inno Setup 6 compiler:
 ;   https://jrsoftware.org/isinfo.php
-;   iscc installers/windows/zee.iss
+;   iscc scripts\make_installer.iss
 ;
-; Expects a built bundle in ..\..\dist\Zee\ (see zee.spec).
+; Expects a built bundle in ..\dist\Zee\ (see scripts\build_windows.bat and
+; zee.spec). Output goes to ..\artifacts\Zee-Setup-<version>.exe.
 
 #define MyAppName "ZEE"
 #define MyAppVersion "1.0.0"
@@ -15,11 +16,14 @@ AppVersion={#MyAppVersion}
 DefaultDirName={autopf}\ZEE
 DefaultGroupName=ZEE
 UninstallDisplayIcon={app}\{#MyAppExeName}
-OutputDir=..\..\dist\installer
+OutputDir=..\artifacts
 OutputBaseFilename=Zee-Setup-{#MyAppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+; The data dir (logs, token, certs, memory) is %APPDATA%\Zee, so uninstalling
+; the app does not delete the user's memory/approval history.
+UninstallDisplayName=ZEE Assistant
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -29,9 +33,9 @@ Name: "desktopicon"; Description: "Create a desktop icon"; GroupDescription: "Ad
 Name: "autostart"; Description: "Start ZEE when I log in"; GroupDescription: "Startup:"
 
 [Files]
-Source: "..\..\dist\Zee\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-; The Vosk model is downloaded separately by the user (see README).
-Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\Zee\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; The Vosk model is downloaded separately (see docs/packaging_windows.md).
+Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\ZEE"; Filename: "{app}\{#MyAppExeName}"; Parameters: "start"; WorkingDir: "{app}"

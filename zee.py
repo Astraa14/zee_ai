@@ -17,8 +17,9 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.request
-import ssl
+import warnings
+
+import requests
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
@@ -26,9 +27,13 @@ if ROOT not in sys.path:
 
 from zee_core import log  # noqa: E402
 
+import apppaths  # noqa: E402
+
+warnings.filterwarnings("ignore", message="Unverified HTTPS request")
+
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".zee")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "zee.conf")
-TOKEN_FILE = os.path.join(ROOT, ".zee_token")
+TOKEN_FILE = apppaths.data_path(".zee_token")
 
 
 def load_config():
@@ -49,15 +54,8 @@ def _get_token():
     token = os.getenv("ZEE_TOKEN")
     if token is not None:
         return token.strip() or None
-    for path in (TOKEN_FILE, os.path.join(CONFIG_DIR, "zee_token")):
-        try:
-            with open(path, encoding="utf-8") as f:
-                tok = f.read().strip()
-            if tok:
-                return tok
-        except OSError:
-            continue
-    return None
+    import tokenstore
+    return tokenstore.read_token()
 
 
 def _base_url():
@@ -65,19 +63,20 @@ def _base_url():
     return f"{scheme}://127.0.0.1:5000"
 
 
-def _ssl_context():
-    # The daemon uses a self-signed cert — fine for localhost automation.
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+def _request(url, method="GET", data=None, timeout=5):
+    """Local HTTP(S) call to the daemon (self-signed cert: no verification)."""
+    headers = {"Content-Type": "application/json"}
+    token = _get_token()
+    if token:
+        headers["X-ZEE-TOKEN"] = token
+    return requests.request(method, url, data=data, headers=headers,
+                            timeout=timeout, verify=False)
 
 
 def _daemon_running():
     try:
-        with urllib.request.urlopen(_base_url() + "/health", timeout=1.5,
-                                    context=_ssl_context()) as resp:
-            return resp.status == 200 or resp.status == 503
+        resp = _request(_base_url() + "/health", timeout=1.5)
+        return resp.status_code in (200, 503)
     except Exception:
         return False
 
@@ -126,7 +125,11 @@ def cmd_start():
 
     if not _daemon_running():
         log.info("Launching ZEE daemon in the background...")
-        _spawn_detached([sys.executable, "-u", os.path.join(ROOT, "zee.py"), "daemon"])
+        if apppaths.frozen():
+            _spawn_detached([sys.executable, "daemon"])
+        else:
+            _spawn_detached([sys.executable, "-u",
+                             os.path.join(ROOT, "zee.py"), "daemon"])
         if not _wait_for_daemon():
             log.error("Daemon did not become ready in time. Check zee.log.")
     try:
@@ -144,25 +147,18 @@ def cmd_gui():
 
 def cmd_stop():
     """Ask the running daemon to shut down via the protected /shutdown endpoint."""
-    import json
     from zee_core import log
 
-    token = _get_token()
-    headers = {}
-    if token:
-        headers["X-ZEE-TOKEN"] = token
-    req = urllib.request.Request(
-        _base_url() + "/shutdown", data=b"{}", method="POST",
-        headers={"Content-Type": "application/json", **headers},
-    )
     try:
-        with urllib.request.urlopen(req, timeout=5, context=_ssl_context()) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-            log.info(f"Daemon: {body.get('message', 'stopping')}")
-            return 0
-    except urllib.error.HTTPError as e:
-        log.error(f"Could not stop daemon (HTTP {e.code}): check ZEE_TOKEN.")
-        return 1
+        resp = _request(_base_url() + "/shutdown", method="POST",
+                        data=b"{}", timeout=5)
+        if resp.status_code != 200:
+            log.error(f"Could not stop daemon (HTTP {resp.status_code}): "
+                      "check ZEE_TOKEN.")
+            return 1
+        body = resp.json()
+        log.info(f"Daemon: {body.get('message', 'stopping')}")
+        return 0
     except Exception as e:
         log.error(f"Could not reach daemon: {e}")
         return 1

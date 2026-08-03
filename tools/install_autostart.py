@@ -12,11 +12,19 @@ Run with ``python -m tools.install_autostart [--gui]`` or ``zee install-autostar
 """
 import argparse
 import os
-import shutil
 import subprocess
 import sys
 
+import apppaths
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _launch_command(mode):
+    """(target, args) to launch ZEE at login: frozen exe, else python zee.py."""
+    if apppaths.frozen():
+        return sys.executable, mode
+    return _pythonw(), f'"{os.path.join(ROOT, "zee.py")}" {mode}'
 
 
 def _pythonw():
@@ -34,8 +42,7 @@ def _install_windows(with_gui):
                            "Programs", "Startup")
     if not os.path.isdir(startup):
         raise RuntimeError(f"Startup folder not found: {startup}")
-    target = _pythonw()
-    args = f'"{os.path.join(ROOT, "zee.py")}" {"start" if with_gui else "daemon"}'
+    target, args = _launch_command("start" if with_gui else "daemon")
     shortcut = os.path.join(startup, "ZEE.lnk")
     ps = (
         "$ws = New-Object -ComObject WScript.Shell; "
@@ -55,6 +62,7 @@ def _install_macos(with_gui=False):
     os.makedirs(launch_dir, exist_ok=True)
     plist = os.path.join(launch_dir, "com.zee.assistant.plist")
     mode = "start" if with_gui else "daemon"
+    program, script = _launch_command(mode)
     content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -63,9 +71,8 @@ def _install_macos(with_gui=False):
     <key>Label</key><string>com.zee.assistant</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{sys.executable}</string>
-        <string>{os.path.join(ROOT, "zee.py")}</string>
-        <string>{mode}</string>
+        <string>{program}</string>
+        <string>{script}</string>
     </array>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><false/>
@@ -83,12 +90,13 @@ def _install_linux(with_gui=False):
     autostart = os.path.expanduser("~/.config/autostart")
     os.makedirs(autostart, exist_ok=True)
     mode = "start" if with_gui else "daemon"
+    program, script = _launch_command(mode)
     desktop = os.path.join(autostart, "zee.desktop")
     content = f"""[Desktop Entry]
 Type=Application
 Name=ZEE Assistant
 Comment=Local voice assistant daemon
-Exec={sys.executable} {os.path.join(ROOT, "zee.py")} {mode}
+Exec={program} {script}
 Terminal=false
 X-GNOME-Autostart-enabled=true
 """
@@ -108,8 +116,6 @@ def install_autostart(with_gui=False):
 
 
 def main(argv=None):
-    if shutil.which("python") is None or sys.platform == "win32":
-        pass  # python is running us already
     parser = argparse.ArgumentParser(description="Register ZEE at login for the current user")
     parser.add_argument("--gui", action="store_true",
                         help="also autostart the desktop GUI window (daemon stays background)")

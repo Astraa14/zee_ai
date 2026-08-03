@@ -7,7 +7,6 @@ When the wake word "zee" is heard the loop broadcasts a ``wake`` event on the
 SSE channel (``/events``) so the desktop GUI can raise itself.
 """
 import json
-import os
 import queue
 import re
 import sys
@@ -101,11 +100,11 @@ def audio_callback(indata, frames, time, status):
 
 def _check_vosk_model():
     """Fail fast with clear instructions when the Vosk model is missing."""
-    if not os.path.isdir("model"):
+    if not zee_core.find_vosk_model():
         log.error(
             "Vosk model not found. Download one from "
             "https://alphacephei.com/vosk/models and unpack it as 'model' "
-            "in the current folder. The web UI (zee_api.py) does NOT need it."
+            "in the project folder. The web UI (zee_api.py) does NOT need it."
         )
         sys.exit(1)
 
@@ -141,7 +140,7 @@ def run_voice_loop():
         log.error("Ollama server is not reachable. Start it with 'ollama serve' "
                   "and pull the model first: ollama pull " + zee_core.OLLAMA_MODEL)
 
-    model = vosk.Model("model")
+    model = vosk.Model(zee_core.find_vosk_model())
     samplerate = 16000
     pending_approval = None
 

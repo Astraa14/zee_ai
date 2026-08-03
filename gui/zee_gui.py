@@ -10,10 +10,11 @@ Run with ``zee gui`` or ``zee start``. Requires PySide6 + PySide6-WebEngine:
 """
 import json
 import os
-import ssl
 import threading
 import time
-import urllib.request
+import warnings
+
+import requests
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QIcon, QPixmap
@@ -24,7 +25,8 @@ from PySide6.QtWidgets import (
     QLineEdit, QMainWindow, QMenu, QMessageBox, QPushButton, QSystemTrayIcon,
 )
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+warnings.filterwarnings("ignore", message="Unverified HTTPS request")
+
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".zee")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "zee.conf")
 
@@ -34,28 +36,20 @@ def _base_url():
     return f"{scheme}://127.0.0.1:5000"
 
 
-def _ssl_ctx():
-    # The daemon uses a self-signed cert — fine for localhost automation.
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
 def _read_token():
     token = os.getenv("ZEE_TOKEN")
     if token is not None:
         return token.strip() or None
-    for path in (os.path.join(ROOT, ".zee_token"),
-                 os.path.join(CONFIG_DIR, "zee_token")):
-        try:
-            with open(path, encoding="utf-8") as f:
-                val = f.read().strip()
-            if val:
-                return val
-        except OSError:
-            continue
-    return None
+    import tokenstore
+    tok = tokenstore.read_token()
+    if tok:
+        return tok
+    try:
+        with open(os.path.join(CONFIG_DIR, "zee_token"), encoding="utf-8") as f:
+            val = f.read().strip()
+        return val or None
+    except OSError:
+        return None
 
 
 def _request(url, data=None, timeout=5):
@@ -63,16 +57,15 @@ def _request(url, data=None, timeout=5):
     headers = {}
     if token:
         headers["X-ZEE-TOKEN"] = token
-    req = urllib.request.Request(url, data=data, headers=headers)
-    if data is not None:
-        req.method = "POST"
-    return urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx())
+    method = "POST" if data is not None else "GET"
+    return requests.request(method, url, data=data, headers=headers,
+                            timeout=timeout, verify=False)
 
 
 def daemon_alive():
     try:
-        with _request(_base_url() + "/health", timeout=1.5) as resp:
-            return resp.status in (200, 503)
+        resp = _request(_base_url() + "/health", timeout=1.5)
+        return resp.status_code in (200, 503)
     except Exception:
         return False
 
@@ -102,12 +95,11 @@ class _SseWorker(QThread):
     def run(self):
         while not self._stopped.is_set():
             try:
-                with _request(self._url, timeout=15) as resp:
-                    for raw in resp:
+                with _request(self._url, timeout=(5, 600)) as resp:
+                    for line in resp.iter_lines(decode_unicode=True):
                         if self._stopped.is_set():
                             return
-                        line = raw.decode("utf-8", "replace").strip()
-                        if line.startswith("data: "):
+                        if line and line.startswith("data: "):
                             self.frame.emit(line[6:])
             except Exception:
                 if self._stopped.is_set():
@@ -264,8 +256,9 @@ class MainWindow(QMainWindow):
 
     def _restart_daemon(self):
         try:
-            with _request(_base_url() + "/shutdown", data=b"{}", timeout=5):
-                pass
+            resp = _request(_base_url() + "/shutdown", data=b"{}", timeout=5)
+            if resp.status_code != 200:
+                raise RuntimeError(f"HTTP {resp.status_code}")
         except Exception as e:
             QMessageBox.warning(self, "ZEE", f"Could not stop the daemon: {e}")
 

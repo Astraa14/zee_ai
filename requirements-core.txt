@@ -7,3 +7,5 @@ sounddevice>=0.4.6
 psutil>=5.9
 Pillow>=10.0
 cryptography>=42.0
+requests>=2.30
+python-keyring>=24.0

@@ -114,6 +114,10 @@ python zee.py install-autostart [--gui]  # register ZEE to start at login
   restart.
 - `start_zee.bat` runs `python zee.py start` on Windows.
 
+Windows **EXE/installer packaging** (PyInstaller + Inno Setup) is documented
+in `docs/packaging_windows.md`; build extra tooling lives in
+`requirements-dev.txt`.
+
 #### Using the microphone from another device (or a LAN IP)
 
 Chrome only allows microphone access on secure origins (`https://` or

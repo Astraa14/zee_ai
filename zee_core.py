@@ -18,6 +18,8 @@ import edge_tts
 import ollama
 import pygame
 
+import apppaths
+
 try:
     import win_control
 except ImportError as e:
@@ -47,8 +49,7 @@ def setup_logging():
     console = logging.StreamHandler()
     console.setFormatter(fmt)
     log.addHandler(console)
-    logfile = os.getenv("ZEE_LOG_FILE") or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "zee.log")
+    logfile = os.getenv("ZEE_LOG_FILE") or apppaths.data_path("zee.log")
     try:
         rotating = logging.handlers.RotatingFileHandler(
             logfile, maxBytes=1_000_000, backupCount=3, encoding="utf-8",
@@ -89,7 +90,7 @@ SYSTEM_PROMPT = (
 )
 
 # ---------------- MEMORY (conversation history + learned facts) ----------------
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_BASE_DIR = apppaths.data_dir()
 _MEMORY_FILE = os.path.join(_BASE_DIR, "zee_memory.json")
 _memory = {}
 _memory_lock = threading.Lock()
@@ -1199,6 +1200,17 @@ def ollama_probe():
         return msg or "unavailable"
 
 
+def find_vosk_model():
+    """Locate the Vosk model dir: cwd/model, the data dir, or the bundle."""
+    if os.path.isdir("model"):
+        return "model"
+    for base in (apppaths.data_dir(), apppaths.resource_dir()):
+        candidate = os.path.join(base, "model")
+        if os.path.isdir(candidate):
+            return candidate
+    return None
+
+
 def doctor():
     """Diagnose the environment: platform, dependencies, Ollama, model, audio.
 
@@ -1248,8 +1260,8 @@ def doctor():
     else:
         rep["audio"] = "ERROR: audio device unavailable (TTS playback disabled)"
 
-    model_dir = os.path.join(os.getcwd(), "model")
-    rep["vosk_model"] = ("ok" if os.path.isdir(model_dir)
+    model_dir = find_vosk_model()
+    rep["vosk_model"] = ("ok" if model_dir
                          else "missing (only needed for zee.py voice loop)")
     rep["automation_enabled"] = automation_enabled()
 

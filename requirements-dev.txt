@@ -1,2 +1,9 @@
-pytest>=8.0
-ruff>=0.9
+# Development / build tooling (not needed at runtime)
+#   pip install -r requirements-dev.txt
+pyinstaller>=6.0
+pytest>=7.0
+pytest-mock>=3.0
+ruff>=0.5
+black>=23.1
+wheel
+pywin32>=305; sys_platform == "win32"

@@ -15,3 +15,8 @@ audit/
 zee.log
 zee_approvals.log
 .pytest_cache/
+build/
+dist/
+artifacts/
+*.pfx
+*.b64

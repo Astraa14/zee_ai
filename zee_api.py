@@ -4,7 +4,6 @@ import ipaddress
 import json
 import os
 import re
-import secrets
 import socket
 import threading
 import time
@@ -16,13 +15,16 @@ import events
 import zee_core
 from zee_core import log
 
-app = Flask(__name__)
+import apppaths
+import tokenstore
+
+app = Flask(__name__, template_folder=apppaths.resource_path("templates"))
 
 # Global cap on request bodies (applies to /ask, /approve, /deny).
 app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("ZEE_MAX_BODY_KB", "16")) * 1024
 
-CERT_FILE = os.path.join(os.path.dirname(__file__), "cert.pem")
-KEY_FILE = os.path.join(os.path.dirname(__file__), "key.pem")
+CERT_FILE = apppaths.data_path("cert.pem")
+KEY_FILE = apppaths.data_path("key.pem")
 
 MAX_TEXT_LEN = 2000
 _APPROVAL_ID_RE = re.compile(r"[0-9a-f]{8,64}")
@@ -31,32 +33,23 @@ _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
 zee_core.setup_logging()
 
 # ---------------- Authentication (Bearer token) ----------------
-TOKEN_FILE = os.path.join(os.path.dirname(__file__), ".zee_token")
+TOKEN_FILE = tokenstore.TOKEN_FILE
 
 
 def _get_token():
-    """Return the auth token from ZEE_TOKEN env, or the token file.
+    """Return the auth token from ZEE_TOKEN env, keyring, or the token file.
 
-    If neither exists, generate one, persist it to .zee_token and
-    return it. Set ZEE_TOKEN=none to disable authentication entirely.
+    Set ZEE_TOKEN=none to disable authentication entirely. Otherwise a fresh
+    token is generated and persisted on first run.
     """
     env = os.getenv("ZEE_TOKEN")
     if env is not None:
         return env.strip() or None  # empty string → auth disabled
-    try:
-        with open(TOKEN_FILE, encoding="utf-8") as f:
-            tok = f.read().strip()
-        if tok:
-            return tok
-    except OSError:
-        pass
-    tok = secrets.token_urlsafe(24)
-    try:
-        with open(TOKEN_FILE, "w", encoding="utf-8") as f:
-            f.write(tok)
-        log.info(f"Generated web UI auth token -> {TOKEN_FILE} (keep this file safe)")
-    except OSError as e:
-        log.error(f"Could not persist auth token: {e}")
+    tok = tokenstore.read_token()
+    if tok:
+        return tok
+    tok = tokenstore.write_token()
+    log.info(f"Generated web UI auth token -> {TOKEN_FILE} (keep this file safe)")
     return tok
 
 
@@ -135,6 +128,7 @@ def _lan_ip():
 
 def ensure_cert():
     """Create a self-signed cert covering localhost and the LAN IP, if missing."""
+    apppaths.ensure_data_dir()
     if os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
         return
     from cryptography import x509
