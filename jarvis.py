@@ -37,7 +37,7 @@ def open_application(command):
     name = m.group(1).strip() if m else None
     if not name:
         return False
-    result = jarvis_core.run_tool("open_app", {"app": name})
+    result = jarvis_core.run_tool("open_app", {"app": name}, actor="voice")
     if result.get("opened") or result.get("opened_website"):
         speak(f"Opening {name}.")
         return True
@@ -47,7 +47,7 @@ def open_application(command):
 def handle_brain(text):
     """Ask the Ollama brain. Returns a pending approval dict, or None."""
     try:
-        answer = jarvis_core.ask_ollama(text)
+        answer = jarvis_core.ask_ollama(text, actor="voice")
     except Exception as e:
         speak("I'm sorry, I am having trouble connecting "
               "to my cognitive processor.")
@@ -138,10 +138,10 @@ def main():
                 if pending_approval is not None:
                     if any(word in text for word in
                            ("yes", "approve", "ok", "okay", "sure", "go ahead", "do it", "confirm", "allowed")):
-                        jarvis_core.approve_action(pending_approval["id"])
+                        jarvis_core.approve_action(pending_approval["id"], actor="voice")
                         speak("Approved.")
                     else:
-                        jarvis_core.deny_action(pending_approval["id"])
+                        jarvis_core.deny_action(pending_approval["id"], actor="voice")
                         speak("Cancelled.")
                     pending_approval = None
                     continue

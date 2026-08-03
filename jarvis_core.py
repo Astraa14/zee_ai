@@ -3,6 +3,7 @@ import importlib
 import inspect
 import json
 import logging
+import logging.handlers
 import os
 import re
 import sys
@@ -31,10 +32,11 @@ _logging_configured = False
 
 
 def setup_logging():
-    """Configure the 'jarvis' logger once (console + optional file).
+    """Configure the 'jarvis' logger once (console + rotating file handler).
 
-    Level from JARVIS_LOG_LEVEL (INFO default); file from JARVIS_LOG_FILE.
-    Safe to call from any module; idempotent.
+    Level from JARVIS_LOG_LEVEL (INFO default). Log file: JARVIS_LOG_FILE or
+    jarvis.log in the project root, rotated at 1 MB (3 backups). Safe to call
+    from any module; idempotent.
     """
     global _logging_configured
     if _logging_configured:
@@ -45,14 +47,18 @@ def setup_logging():
     console = logging.StreamHandler()
     console.setFormatter(fmt)
     log.addHandler(console)
-    logfile = os.getenv("JARVIS_LOG_FILE")
-    if logfile:
-        try:
-            fh = logging.FileHandler(logfile, encoding="utf-8")
-            fh.setFormatter(fmt)
-            log.addHandler(fh)
-        except OSError as e:
-            log.error(f"Cannot open log file {logfile!r}: {e}")
+    logfile = os.getenv("JARVIS_LOG_FILE") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "jarvis.log")
+    try:
+        rotating = logging.handlers.RotatingFileHandler(
+            logfile, maxBytes=1_000_000, backupCount=3, encoding="utf-8",
+        )
+        rotating.setFormatter(fmt)
+        log.addHandler(rotating)
+        # Flask's request logs land in the same file.
+        logging.getLogger("werkzeug").addHandler(rotating)
+    except OSError as e:
+        log.error(f"Cannot open log file {logfile!r}: {e}")
 
 
 setup_logging()
@@ -254,10 +260,43 @@ def speak(text, wait=False):
 # ==========================================
 MAX_ARG_LEN = 1000
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+# Rejected outright in subprocess-bound / sensitive inputs.
+_DANGEROUS_CHARS_RE = re.compile(r"[\n\r;|`$&]")
+
+# Desktop/browser automation (Discord, messenger search, ...) is opt-in.
+AUTOMATION_ENABLED = os.getenv("JARVIS_ALLOW_AUTOMATION", "0") == "1"
+AUTOMATION_DISABLED_MSG = "Automation disabled; set JARVIS_ALLOW_AUTOMATION=1 to enable"
+
+
+def automation_enabled():
+    """True when desktop/browser automation is opted in via env."""
+    return os.getenv("JARVIS_ALLOW_AUTOMATION", "0") == "1"
+
+
+def automation_denied():
+    """Error dict returned by automation tools when the opt-in flag is off."""
+    return {"error": AUTOMATION_DISABLED_MSG}
+
+
+def sanitize_input(text, maxlen=120):
+    """Strict sanitizer for user-controlled strings bound for subprocess/URLs.
+
+    Returns the trimmed, cleaned string, or None when the input is unsafe:
+    empty, longer than maxlen, contains control characters, or any of
+    ; & | ` $ and newlines.
+    """
+    if text is None:
+        return None
+    s = str(text).strip()
+    if not s or len(s) > maxlen:
+        return None
+    if _CONTROL_CHARS_RE.search(s) or _DANGEROUS_CHARS_RE.search(s):
+        return None
+    return s
 
 
 def clean_text(s, maxlen=MAX_ARG_LEN):
-    """Strip control characters and cap the length of untrusted input."""
+    """Soft cleaner: strip control characters and cap the length. Never rejects."""
     s = "" if s is None else str(s)
     s = _CONTROL_CHARS_RE.sub("", s)
     return s[:maxlen].strip()
@@ -509,23 +548,34 @@ KNOWN_APP_NAMES = set(getattr(win_control, "KNOWN_APP_NAMES", ()))
 DANGEROUS_TOOLS = {"kill_process", "system_action"}
 
 _APPROVAL_FILE = os.path.join(_BASE_DIR, "pending_approvals.json")
-_AUDIT_DIR = os.path.join(_BASE_DIR, "audit")
+_APPROVALS_LOG = os.path.join(_BASE_DIR, "approvals.log")
 _APPROVAL_TTL = int(os.getenv("JARVIS_APPROVAL_TTL", "120"))
 
 _pending_approvals = {}
 _approval_lock = threading.Lock()
 
 
-def _audit(event, **fields):
-    """Append one line to the append-only approval audit log."""
+def _iso(ts):
+    from datetime import datetime
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _append_approval(status, approval_id, name, args, expires=None, actor="unknown"):
+    """Append one JSON line to approvals.log (audit trail)."""
+    entry = {
+        "timestamp": _iso(time.time()),
+        "id": approval_id,
+        "action": name,
+        "args": json.dumps(args, ensure_ascii=False),
+        "expires": _iso(expires) if expires else None,
+        "status": status,
+        "actor": actor,
+    }
     try:
-        os.makedirs(_AUDIT_DIR, exist_ok=True)
-        entry = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "event": event}
-        entry.update(fields)
-        with open(os.path.join(_AUDIT_DIR, "approvals.jsonl"), "a", encoding="utf-8") as f:
+        with open(_APPROVALS_LOG, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except OSError as e:
-        log.warning(f"Could not write audit log: {e}")
+        log.warning(f"Could not write approvals log: {e}")
 
 
 def _load_pending_approvals():
@@ -561,7 +611,7 @@ def _save_pending_approvals():
         log.warning(f"Could not save pending approvals: {e}")
 
 
-def request_approval(name, args):
+def request_approval(name, args, actor="unknown"):
     """Register a dangerous action for later approval and return a needs_approval result."""
     aid = uuid.uuid4().hex[:16]
     now = time.time()
@@ -569,16 +619,16 @@ def request_approval(name, args):
         for old_id, old in list(_pending_approvals.items()):
             if old.get("expires", 0) < now:
                 _pending_approvals.pop(old_id, None)
-                _audit("expired", id=old_id, action=old.get("name"),
-                       args=json.dumps(old.get("args")))
+                _append_approval("expired", old_id, old.get("name"),
+                                 old.get("args"), old.get("expires"), actor)
         _pending_approvals[aid] = {
             "name": name,
             "args": args,
             "expires": now + _APPROVAL_TTL,
         }
     _save_pending_approvals()
-    _audit("requested", id=aid, action=name, args=json.dumps(args))
-    log.warning(f"Approval requested: {name}({json.dumps(args)}) [id={aid}]")
+    _append_approval("requested", aid, name, args, now + _APPROVAL_TTL, actor)
+    log.warning(f"Approval requested: {name}({json.dumps(args)}) [id={aid}, actor={actor}]")
     return {
         "needs_approval": True,
         "id": aid,
@@ -588,66 +638,66 @@ def request_approval(name, args):
     }
 
 
-def maybe_request_approval(user_text):
+def maybe_request_approval(user_text, actor="unknown"):
     """Safety net: if the user asked for a dangerous action but the model didn't
     call a tool, register the approval anyway so the flow always works."""
     t = (user_text or "").lower()
     if re.search(r"\b(shut\s?down|power\s?off|turn\s?off)\b.*\b(computer|pc|machine|laptop|system)\b", t) or \
        re.fullmatch(r"\s*(shut\s?down|power\s?off)\s*[.!]*\s*", t):
-        return request_approval("system_action", {"action": "shutdown"})
+        return request_approval("system_action", {"action": "shutdown"}, actor=actor)
     if re.search(r"\b(restart|reboot)\b", t):
-        return request_approval("system_action", {"action": "restart"})
+        return request_approval("system_action", {"action": "restart"}, actor=actor)
     if re.search(r"\b(hibernate|sleep)\b.*\b(computer|pc|system|laptop)\b", t):
-        return request_approval("system_action", {"action": "sleep"})
+        return request_approval("system_action", {"action": "sleep"}, actor=actor)
     if re.search(r"\blog\s?off\b|\bsign\s?out\b", t):
-        return request_approval("system_action", {"action": "logoff"})
+        return request_approval("system_action", {"action": "logoff"}, actor=actor)
     if re.search(r"\block\b.*\b(computer|pc|screen)\b", t):
-        return request_approval("system_action", {"action": "lock"})
+        return request_approval("system_action", {"action": "lock"}, actor=actor)
     m = re.search(r"\b(kill|close|terminate|stop)\s+(?:the\s+)?([a-z][a-z0-9 ._-]{1,24})", t)
     if m:
         name = m.group(2).split()[0].removesuffix(".exe")
         if name in KNOWN_APP_NAMES or name.endswith("app") or name.endswith("application") or name.endswith("browser"):
-            return request_approval("kill_process", {"name": name})
+            return request_approval("kill_process", {"name": name}, actor=actor)
     return None
 
 
-def approve_action(action_id):
+def approve_action(action_id, actor="unknown"):
     """Execute a previously requested dangerous action. Returns the result dict."""
     with _approval_lock:
         item = _pending_approvals.pop(action_id, None)
     if item is None:
         _save_pending_approvals()
-        _audit("approve_missing", id=action_id)
+        _append_approval("approve_missing", action_id, None, None, None, actor)
         return {"error": "Approval expired or not found."}
     if item.get("expires", 0) < time.time():
         _save_pending_approvals()
-        _audit("expired", id=action_id, action=item.get("name"),
-               args=json.dumps(item.get("args")))
+        _append_approval("expired", action_id, item.get("name"),
+                         item.get("args"), item.get("expires"), actor)
         return {"error": "Approval expired."}
     _save_pending_approvals()
     func = _TOOL_FUNCS.get(item["name"])
     if not func:
-        _audit("approve_failed", id=action_id, action=item.get("name"),
-               reason="unknown tool")
+        _append_approval("approved_failed", action_id, item.get("name"),
+                         item.get("args"), item.get("expires"), actor)
         return {"error": f"Unknown tool: {item['name']}"}
     try:
         result = func(**_filter_args(func, item["args"])) if item["args"] else func()
     except Exception as e:
         result = {"error": f"{item['name']} failed: {e}"}
-    _audit("approved", id=action_id, action=item["name"],
-           args=json.dumps(item["args"]), result=json.dumps(result))
+    _append_approval("approved", action_id, item["name"], item["args"],
+                     item.get("expires"), actor)
     log.info(f"[approved] {item['name']}({json.dumps(item['args'])}) -> {json.dumps(result)}")
     return result
 
 
-def deny_action(action_id):
+def deny_action(action_id, actor="unknown"):
     """Cancel a previously requested dangerous action."""
     with _approval_lock:
         item = _pending_approvals.pop(action_id, None)
     if item is not None:
         _save_pending_approvals()
-        _audit("denied", id=action_id, action=item.get("name"),
-               args=json.dumps(item.get("args")))
+        _append_approval("denied", action_id, item.get("name"),
+                         item.get("args"), item.get("expires"), actor)
         log.info(f"[denied] {item.get('name')}({json.dumps(item.get('args'))}) [id={action_id}]")
     return {"denied": True}
 
@@ -771,13 +821,13 @@ _TOOL_FUNCS = _CORE_TOOL_FUNCS
 TOOLS = _CORE_TOOLS + (win_control.WIN_TOOLS if win_control is not None else [])
 
 
-def run_tool(name, args):
+def run_tool(name, args, actor="unknown"):
     """Execute a tool by name. Never raises; returns a result dict."""
     func = _TOOL_FUNCS.get(name)
     if not func:
         return {"error": f"Unknown tool: {name}"}
     if name in DANGEROUS_TOOLS:
-        return request_approval(name, args)
+        return request_approval(name, args, actor=actor)
     try:
         result = func(**_filter_args(func, args)) if args else func()
     except Exception as e:
@@ -888,13 +938,13 @@ def _guard_blocked(name, user_text):
     return not any(k in low for k in keywords)
 
 
-def _guarded_run(name, args, user_text):
+def _guarded_run(name, args, user_text, actor="unknown"):
     """Run a tool, refusing when the user never asked for it."""
     if _guard_blocked(name, user_text):
         return {"error": f"Do not use the '{name}' tool: the user did not ask for it. "
                          "Never mention this tool again — answer the user's actual "
                          "question directly instead."}
-    return run_tool(name, args)
+    return run_tool(name, args, actor=actor)
 
 
 def _unknown_tool_name(content):
@@ -908,7 +958,7 @@ def _unknown_tool_name(content):
     return None
 
 
-def ask_ollama(text):
+def ask_ollama(text, actor="voice"):
     """Query the local Ollama LLM, letting it call tools as needed. Raises on failure.
 
     Returns an AskResult. If the model requested a dangerous action, result.approval
@@ -951,7 +1001,7 @@ def ask_ollama(text):
                     if tool_rounds > 5:
                         raise RuntimeError("The model called tools too many times; giving up.")
                     messages.append({"role": "assistant", "content": response.message.content})
-                    result = _guarded_run(name, args, text)
+                    result = _guarded_run(name, args, text, actor)
                     if result.get("needs_approval"):
                         approval = result
                     messages.append({"role": "tool", "content": json.dumps(result)})
@@ -969,7 +1019,7 @@ def ask_ollama(text):
                 })
                 continue
             if approval is None:
-                approval = maybe_request_approval(text)
+                approval = maybe_request_approval(text, actor)
             _remember(text, response.message.content)
             return AskResult(response.message.content, approval=approval)
 
@@ -981,7 +1031,7 @@ def ask_ollama(text):
         for call in response.message.tool_calls:
             name = call.function.name
             args = call.function.arguments or {}
-            result = _guarded_run(name, args, text)
+            result = _guarded_run(name, args, text, actor)
             if result.get("needs_approval"):
                 approval = result
             messages.append({"role": "tool", "content": json.dumps(result)})
@@ -995,8 +1045,9 @@ class StreamAsk:
     .approval is set if a dangerous action is awaiting confirmation.
     """
 
-    def __init__(self, text):
+    def __init__(self, text, actor="web"):
         self._text = text
+        self.actor = actor
         self.full_text = ""
         self.approval = None
 
@@ -1051,7 +1102,7 @@ def _ask_stream(sa):
                     raise RuntimeError("The model called tools too many times; giving up.")
                 messages.append({"role": "assistant", "content": content})
                 name, args = inline
-                result = _guarded_run(name, args, sa._text)
+                result = _guarded_run(name, args, sa._text, sa.actor)
                 if result.get("needs_approval"):
                     sa.approval = result
                 messages.append({"role": "tool", "content": json.dumps(result)})
@@ -1070,7 +1121,7 @@ def _ask_stream(sa):
                 continue
             # Final answer — stream it.
             if sa.approval is None:
-                sa.approval = maybe_request_approval(sa._text)
+                sa.approval = maybe_request_approval(sa._text, sa.actor)
             for piece in buffered:
                 sa.full_text += piece
                 yield piece
@@ -1093,7 +1144,7 @@ def _ask_stream(sa):
         for call in tool_calls:
             name = call.function.name
             args = call.function.arguments or {}
-            result = _guarded_run(name, args, sa._text)
+            result = _guarded_run(name, args, sa._text, sa.actor)
             if result.get("needs_approval"):
                 sa.approval = result
             messages.append({"role": "tool", "content": json.dumps(result)})
@@ -1124,6 +1175,16 @@ def check_ollama():
         return True
     except Exception:
         return False
+
+
+def ollama_probe():
+    """Health probe string: 'ok', 'unavailable', or the underlying error."""
+    try:
+        ollama.list()
+        return "ok"
+    except Exception as e:
+        msg = str(e).strip()
+        return msg or "unavailable"
 
 
 def doctor():
@@ -1178,6 +1239,7 @@ def doctor():
     model_dir = os.path.join(os.getcwd(), "model")
     rep["vosk_model"] = ("ok" if os.path.isdir(model_dir)
                          else "missing (only needed for jarvis.py voice loop)")
+    rep["automation_enabled"] = automation_enabled()
 
     critical_ok = (
         all(v == "ok" for k, v in deps.items() if k in _CRITICAL_DEPS)
@@ -1198,6 +1260,7 @@ def doctor_summary(rep):
     lines.append(f"  model         {rep.get('model')}")
     lines.append(f"  audio         {rep.get('audio')}")
     lines.append(f"  vosk model    {rep.get('vosk_model')}")
+    lines.append(f"  automation    {'enabled' if rep.get('automation_enabled') else 'DISABLED (JARVIS_ALLOW_AUTOMATION=1)'}")
     return lines
 
 

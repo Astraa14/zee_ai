@@ -14,8 +14,9 @@ import app as app_module
 class _FakeStream:
     """Drop-in for jarvis_core.StreamAsk that yields canned text."""
 
-    def __init__(self, text):
+    def __init__(self, text, actor="web"):
         self._text = text
+        self.actor = actor
         self.full_text = "fake reply"
         self.approval = None
 
@@ -29,6 +30,8 @@ def fake_brain(monkeypatch):
     monkeypatch.setattr(jarvis_core, "StreamAsk", _FakeStream)
     monkeypatch.setattr(jarvis_core, "speak", lambda *a, **k: None)
     monkeypatch.setattr(jarvis_core, "run_tool", lambda *a, **k: {"error": "not used"})
+    monkeypatch.setattr(jarvis_core, "ollama_probe", lambda: "unavailable")
+    monkeypatch.setattr(jarvis_core, "automation_enabled", lambda: False)
     monkeypatch.setattr(app_module, "_token", "ci-test-token")
     yield
 
@@ -98,7 +101,7 @@ def test_ask_body_too_large(client):
 
 
 def test_invalid_approval_id_format(client, monkeypatch):
-    monkeypatch.setattr(jarvis_core, "approve_action", lambda aid: {"ok": True})
+    monkeypatch.setattr(jarvis_core, "approve_action", lambda aid, actor="web": {"ok": True})
     resp = client.post("/approve",
                        data=json.dumps({"approval_id": "not-hex!!"}),
                        content_type="application/json",
@@ -108,8 +111,9 @@ def test_invalid_approval_id_format(client, monkeypatch):
 
 # ---------------- approval endpoints ----------------
 def test_approve_success(client, monkeypatch):
-    def fake_approve(aid):
+    def fake_approve(aid, actor="web"):
         assert aid == "a" * 16
+        assert actor == "web"
         return {"executed": "lock"}
 
     monkeypatch.setattr(jarvis_core, "approve_action", fake_approve)
@@ -122,7 +126,7 @@ def test_approve_success(client, monkeypatch):
 
 
 def test_deny_success(client, monkeypatch):
-    monkeypatch.setattr(jarvis_core, "deny_action", lambda aid: {"denied": True})
+    monkeypatch.setattr(jarvis_core, "deny_action", lambda aid, actor="web": {"denied": True})
     resp = client.post("/deny",
                        data=json.dumps({"approval_id": "b" * 16}),
                        content_type="application/json",
@@ -139,6 +143,16 @@ def test_rate_limit(client, monkeypatch):
     assert _auth(client).status_code == 429
 
 
+def test_rate_limit_is_per_token(client, monkeypatch):
+    """The bucket is keyed by the token, not just the client IP."""
+    monkeypatch.setattr(app_module, "_ask_limiter",
+                        app_module._RateLimiter(1, 60))
+    monkeypatch.setattr(app_module, "_authorized", lambda: True)
+    assert _auth(client, token="token-a").status_code == 200
+    assert _auth(client, token="token-a").status_code == 429
+    assert _auth(client, token="token-b").status_code == 200
+
+
 # ---------------- health endpoint ----------------
 def test_health_ok(client, monkeypatch):
     monkeypatch.setattr(jarvis_core, "check_ollama", lambda: True)
@@ -148,6 +162,18 @@ def test_health_ok(client, monkeypatch):
     data = resp.get_json()
     assert data["status"] == "ok" and data["ready"] is True
     assert data["ollama"] is True and data["model_available"] is True
+    assert "automation_enabled" in data
+    assert data["automation_enabled"] is False
+
+
+def test_health_reports_automation_when_enabled(client, monkeypatch):
+    monkeypatch.setattr(jarvis_core, "check_ollama", lambda: True)
+    monkeypatch.setattr(jarvis_core.ollama, "show", lambda model: True)
+    monkeypatch.setattr(jarvis_core, "automation_enabled", lambda: True)
+    monkeypatch.setattr(jarvis_core, "ollama_probe", lambda: "ok")
+    data = client.get("/health").get_json()
+    assert data["automation_enabled"] is True
+    assert data["ollama_detail"] == "ok"
 
 
 def test_health_degraded_when_ollama_down(client, monkeypatch):
@@ -173,7 +199,7 @@ def test_health_degraded_when_model_missing(client, monkeypatch):
 # ---------------- open fast-path ----------------
 def test_open_fastpath(client, monkeypatch):
     monkeypatch.setattr(jarvis_core, "run_tool",
-                        lambda name, args: {"opened": "notepad"})
+                        lambda name, args, actor="web": {"opened": "notepad"})
     resp = _auth(client, {"text": "open notepad"})
     assert resp.status_code == 200
     body = resp.data.decode("utf-8")
@@ -182,7 +208,7 @@ def test_open_fastpath(client, monkeypatch):
 
 def test_open_fastpath_rejects_questions(client, monkeypatch):
     monkeypatch.setattr(jarvis_core, "run_tool",
-                        lambda name, args: {"error": "nope"})
+                        lambda name, args, actor="web": {"error": "nope"})
     resp = _auth(client, {"text": "what is an open book"})
     assert resp.status_code == 200  # goes to the brain instead
     assert "fake" in resp.data.decode("utf-8")

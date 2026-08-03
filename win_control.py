@@ -19,11 +19,13 @@ import os
 import re
 import subprocess
 import time
+import urllib.parse
 
 log = logging.getLogger("jarvis.win")
 
 MAX_ARG_LEN = 1000
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+_DANGEROUS_CHARS_RE = re.compile(r"[\n\r;|`$&]")
 _SAFE_APP_NAME_RE = re.compile(r"[a-z0-9 ._\-]{1,40}")
 _SAFE_DOMAIN_RE = re.compile(r"[a-z0-9\-]+(\.[a-z0-9\-]+)+")
 _PATH_CHARS_RE = re.compile(r"[\\/:*?\"<>|]")
@@ -34,6 +36,59 @@ def _clean_text(s, maxlen=MAX_ARG_LEN):
     s = "" if s is None else str(s)
     s = _CONTROL_CHARS_RE.sub("", s)
     return s[:maxlen].strip()
+
+
+def sanitize_input(text, maxlen=120):
+    """Strict sanitizer for inputs bound for subprocess/URLs.
+
+    Returns the trimmed, cleaned string, or None when unsafe: empty, too
+    long, control characters, or any of ; & | ` $ and newlines.
+    """
+    if text is None:
+        return None
+    s = str(text).strip()
+    if not s or len(s) > maxlen:
+        return None
+    if _CONTROL_CHARS_RE.search(s) or _DANGEROUS_CHARS_RE.search(s):
+        return None
+    return s
+
+
+def _automation_enabled():
+    """Desktop/browser automation is opt-in via JARVIS_ALLOW_AUTOMATION=1."""
+    return os.getenv("JARVIS_ALLOW_AUTOMATION", "0") == "1"
+
+
+def automation_denied():
+    return {"error": "Automation disabled; set JARVIS_ALLOW_AUTOMATION=1 to enable"}
+
+
+def safe_run(cmd, timeout=10):
+    """Run a command list — never through a shell, always with a timeout.
+
+    Returns (returncode, stdout, stderr); on failure returncode is None and
+    stderr holds an error string.
+    """
+    try:
+        res = subprocess.run(cmd, timeout=timeout, capture_output=True, text=True)
+        return res.returncode, res.stdout, res.stderr
+    except subprocess.TimeoutExpired:
+        return None, None, f"timed out after {timeout}s"
+    except Exception as e:
+        return None, None, str(e)
+
+
+def open_url(url):
+    """Open an http/https URL in the default browser. None on success, else error."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return f"Refusing to open non-http(s) URL: {url!r}"
+    if os.name == "nt":
+        code, _, err = safe_run(["cmd", "/c", "start", "", url], timeout=10)
+    else:
+        opener = "open" if sys_platform_darwin() else "xdg-open"
+        code, _, err = safe_run([opener, url], timeout=10)
+    return None if code in (0, 1) else (err or f"browser open failed (exit {code})")
 
 
 # ---------------- APP LAUNCHING ----------------
@@ -67,7 +122,20 @@ _KNOWN_APPS = {
     "maps": "https://maps.google.com",
     "maps google": "https://maps.google.com",
     "whatsapp": "https://web.whatsapp.com",
+    "messenger": "https://www.messenger.com",
+    "facebook messenger": "https://www.messenger.com",
+    "facebook messages": "https://www.facebook.com/messages",
+    "facebook messages page": "https://www.facebook.com/messages",
 }
+
+# Opening these requires the JARVIS_ALLOW_AUTOMATION opt-in (logged-in web session).
+MESSENGER_KEYS = {"messenger", "facebook messenger", "facebook messages", "facebook messages page"}
+
+_MESSENGER_SEARCH_RE = re.compile(
+    r"^(messenger|facebook messenger|facebook messages|facebook messages page)\s+"
+    r"search(?:\s+for)?\s+(.+)$",
+    re.IGNORECASE,
+)
 
 KNOWN_APP_NAMES = set(_KNOWN_APPS)
 
@@ -118,21 +186,25 @@ def _resolve_app(app):
 
 def _start(target):
     """Launch a target (exe name, .lnk path or URL) detached, without a shell."""
-    subprocess.Popen(
-        ["cmd", "/c", "start", "", target],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
+    safe_run(["cmd", "/c", "start", "", target], timeout=10)
 
 
 def tool_open_app(app: str):
     """Open a desktop app or website. Only trusted targets are launched."""
     if os.name != "nt":
         return {"error": "App launching is only supported on Windows."}
-    app = _clean_text(app, 60).lower()
+    app = sanitize_input(app, 60)
     if not app:
-        return {"error": "No application name given."}
+        return {"error": "Invalid or unsupported application name."}
+    app = app.lower()
+
+    # Messenger / Facebook Messages open a logged-in web session → opt-in required.
+    m = _MESSENGER_SEARCH_RE.match(app)
+    if m:
+        return tool_open_messenger_search(m.group(2))
+    if app in MESSENGER_KEYS:
+        return tool_open_messenger_search()
+
     target, trusted = _resolve_app(app)
 
     if target.startswith(("https://", "http://")):
@@ -141,14 +213,40 @@ def tool_open_app(app: str):
         _start(target)
         return {"opened_website": target}
     if trusted:
-        via = "installed app" if target.lower().endswith(".lnk") else "known app"
+        if target.lower().endswith(".lnk"):
+            try:
+                os.startfile(target)
+            except OSError as e:
+                return {"error": f"Could not open {target}: {e}"}
+            return {"opened": target, "via": "installed app"}
         _start(target)
-        return {"opened": target, "via": via}
+        return {"opened": target, "via": "known app"}
     if _SAFE_DOMAIN_RE.fullmatch(target) or _SITE_SUFFIX_RE.search(target):
         url = f"https://{target}"
         _start(url)
         return {"opened_website": url}
     return {"error": f"Unsupported application name: {app!r}"}
+
+
+def tool_open_messenger_search(name: str = None):
+    """Open a Messenger search for a contact (logged-in web session, opt-in)."""
+    if not _automation_enabled():
+        return automation_denied()
+    if name is not None:
+        clean = sanitize_input(name, 80)
+        if not clean:
+            return {"error": "Invalid contact name."}
+        url = "https://www.messenger.com/search?q=" + urllib.parse.quote(clean)
+        err = open_url(url)
+        if err:
+            return {"error": err}
+        return {"opened": url}
+    url = "https://www.messenger.com"
+    err = open_url(url)
+    if err:
+        return {"error": err}
+    return {"opened": url,
+            "note": "Please search manually; I opened messenger in your browser"}
 
 
 # ---------------- FILES ----------------
@@ -261,6 +359,7 @@ def _discord_sendkeys(keys):
             ["powershell", "-NoProfile", "-Command", script],
             capture_output=True, text=True, timeout=20,
         )
+        log.debug(f"discord sendkeys {keys!r} -> {out.stdout.strip()!r}")
         return out.stdout.strip()
     except Exception as e:
         return f"error: {e}"
@@ -290,23 +389,32 @@ def _uia_click(button_name):
         return False
 
 
-def tool_discord_contact(name: str):
-    """Find a Discord user and open their DM via the quick switcher (Ctrl+K)."""
-    name = _clean_text(name, 50)
+def tool_discord_contact(name: str, search: bool = False):
+    """Find a Discord user and open their DM via the quick switcher (Ctrl+K).
+
+    Requires JARVIS_ALLOW_AUTOMATION=1 and the Discord desktop app running.
+    """
+    if not _automation_enabled():
+        return automation_denied()
+    name = sanitize_input(name, 80)
     if not name:
-        return {"error": "No Discord user given."}
+        return {"error": "Invalid Discord username."}
     if _discord_sendkeys("^k") == "notfound":
         return {"error": "Discord is not running. Start Discord first."}
     time.sleep(1.2)
     _discord_sendkeys(name)
     time.sleep(1.5)
     _discord_sendkeys("{ENTER}")
+    if search:
+        log.info(f"Discord quick-switcher search for '{name}' completed")
     return {"opened_chat_with": name}
 
 
 def tool_discord_call(name: str):
     """Open a DM with a Discord user and start a voice call."""
-    res = tool_discord_contact(name)
+    if not _automation_enabled():
+        return automation_denied()
+    res = tool_discord_contact(name, search=True)
     if "error" in res:
         return res
     time.sleep(1.5)
@@ -482,7 +590,10 @@ _PROTECTED_PROCESSES = {
 
 
 def tool_kill_process(name: str):
-    import psutil
+    try:
+        import psutil
+    except Exception as e:
+        return {"error": f"psutil unavailable: {e}"}
     name = _clean_text(name, 60)
     if not name:
         return {"error": "No process name given."}
@@ -538,10 +649,10 @@ WIN_TOOLS = [
         "type": "function",
         "function": {
             "name": "open_app",
-            "description": "Open a desktop application (e.g. notepad, calculator, browser, paint, terminal) or a website (e.g. youtube, google, gmail, facebook, netflix).",
+            "description": "Open a desktop application (e.g. notepad, calculator, browser, paint, terminal) or a website (e.g. youtube, google, gmail, facebook, netflix). For a Messenger/Facebook contact search say 'messenger search <name>'. Opening messenger or running a messenger search requires the JARVIS_ALLOW_AUTOMATION opt-in.",
             "parameters": {
                 "type": "object",
-                "properties": {"app": {"type": "string", "description": "Name of the application to open"}},
+                "properties": {"app": {"type": "string", "description": "Name of the application to open, or \"messenger search <name>\""}},
                 "required": ["app"],
             },
         },
@@ -562,10 +673,25 @@ WIN_TOOLS = [
         "type": "function",
         "function": {
             "name": "discord_contact",
-            "description": "Find a Discord user and open their direct message chat. Requires the Discord desktop app to be running.",
+            "description": "Find a Discord user and open their direct message chat. Requires the Discord desktop app running and the JARVIS_ALLOW_AUTOMATION opt-in.",
             "parameters": {
                 "type": "object",
-                "properties": {"name": {"type": "string", "description": "The Discord username to find"}},
+                "properties": {
+                    "name": {"type": "string", "description": "The Discord username to find"},
+                    "search": {"type": "boolean", "description": "Use the quick switcher to search (default true)"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_messenger_search",
+            "description": "Search Messenger (Facebook) for a contact and open the result in the browser. Requires the JARVIS_ALLOW_AUTOMATION opt-in.",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string", "description": "Contact name to search for, e.g. John Doe"}},
                 "required": ["name"],
             },
         },
@@ -690,6 +816,7 @@ WIN_TOOLS = [
 
 WIN_TOOL_FUNCS = {
     "open_app": tool_open_app,
+    "open_messenger_search": tool_open_messenger_search,
     "open_file": tool_open_file,
     "discord_contact": tool_discord_contact,
     "discord_call": tool_discord_call,

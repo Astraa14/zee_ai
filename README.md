@@ -110,16 +110,35 @@ The web API is protected with a **Bearer token** when exposed on the LAN:
 - All POST endpoints (`/ask`, `/approve`, `/deny`) return `401` without it.
 - To disable auth (localhost only), set `JARVIS_TOKEN=none`.
 
-Rate limiting: `/ask` allows `JARVIS_RATE_LIMIT` requests/minute per client
-IP (default 30) and request bodies are capped at `JARVIS_MAX_BODY_KB` (default
-16 KB). Oversized requests get `413`, rate-limited ones get `429`.
+Rate limiting: `/ask` allows `JARVIS_RATE_LIMIT` requests/minute **per API
+token** (default 10; unauthenticated clients share a bucket per IP) and request
+bodies are capped at `JARVIS_MAX_BODY_KB` (default 16 KB). Oversized requests
+get `413`, rate-limited ones get `429`.
+
+### Automation (opt-in)
+
+Discord messages/calls and Messenger/Facebook search open live apps and
+logged-in web sessions, so they are **off by default**. Set
+**`JARVIS_ALLOW_AUTOMATION=1`** to enable them:
+
+| Tool | Behavior |
+| ---- | -------- |
+| `discord_contact` / `discord_call` | Uses the running Discord desktop app (Ctrl+K quick switcher). No app → `"Discord is not running"`. |
+| `open_messenger_search` | Opens `https://www.messenger.com/search?q=<name>` in your browser. |
+| `open_app` | `"messenger search <name>"` → above; plain `"messenger"`/`"facebook messages"` opens the web session. |
+
+Inputs are strictly validated before any subprocess/URL is built (`; & | ` $`
+and control characters are rejected) and every action is written to the
+approval log. Without the flag all of these return an error telling you to set
+`JARVIS_ALLOW_AUTOMATION=1`.
 
 ### Diagnostics
 
 `python jarvis_core.py --doctor` prints a health report (dependencies,
-Ollama + model availability, audio, Vosk model) and exits nonzero when
-critical pieces are missing. `app.py` and `jarvis.py` log the same report
-at startup.
+Ollama + model availability, audio, Vosk model, automation flag) and exits
+nonzero when critical pieces are missing. `app.py` and `jarvis.py` log the
+same report at startup. Server logs rotate in `jarvis.log`
+(`JARVIS_LOG_FILE`).
 
 ### Health endpoint
 
@@ -127,8 +146,9 @@ at startup.
 reachable, `503` otherwise:
 
 ```json
-{"status": "ok", "ready": true, "ollama": true,
- "model_available": true, "audio": true, "model": "llama3.2:latest"}
+{"status": "ok", "ready": true, "ollama": true, "ollama_detail": "ok",
+ "automation_enabled": false, "model_available": true,
+ "audio": true, "model": "llama3.2:latest"}
 ```
 
 Useful for uptime monitors or restart scripts. Not behind the token (it only
@@ -209,7 +229,9 @@ confirm:
 Pending approvals expire after 2 minutes (`JARVIS_APPROVAL_TTL`), are
 **persisted to disk** (`pending_approvals.json`, survives restarts), and can
 **never be replayed** — each approval id works exactly once. Every request,
-approval and denial is written to `audit/approvals.jsonl`. System-critical
+approval and denial is written in JSON-lines format to `approvals.log` with
+`timestamp / id / action / args / expires / status / actor` (web calls are
+attributed to `web`, the voice loop to `voice`). System-critical
 processes (explorer, svchost, lsass, etc.) are always refused even when
 approved.
 
@@ -237,9 +259,10 @@ Set any of these environment variables before running:
 | `JARVIS_HTTPS`        | `1`                      | Serve over HTTPS with a self-signed cert (`app.py`) |
 | `FLASK_DEBUG`         | `0`                      | Flask auto-reloader on/off (`app.py`)       |
 | `JARVIS_TOKEN`        | *(generated)*            | Web UI auth token; `none` disables auth     |
-| `JARVIS_RATE_LIMIT`   | `30`                     | `/ask` requests per minute per client IP    |
+| `JARVIS_RATE_LIMIT`   | `10`                     | `/ask` requests per minute per API token    |
 | `JARVIS_MAX_BODY_KB`  | `16`                     | Max JSON request body size (`/ask` etc.)    |
 | `JARVIS_APPROVAL_TTL` | `120`                    | Seconds before a pending approval expires   |
+| `JARVIS_ALLOW_AUTOMATION` | `0`                  | Set `1` to enable Discord/Messenger automation |
 | `JARVIS_LOG_LEVEL`    | `INFO`                   | Log verbosity (`DEBUG`, `INFO`, `WARNING`…) |
 | `JARVIS_LOG_FILE`     | *(console only)*         | Optional log file path                      |
 
@@ -247,7 +270,8 @@ Set any of these environment variables before running:
 
 All modules log through a shared `jarvis` logger with levels and timestamps
 (no scattered `print()` calls). Set `JARVIS_LOG_LEVEL=DEBUG` for verbose
-tool/trace output and `JARVIS_LOG_FILE=jarvis.log` to also write to a file.
+tool/trace output. `JARVIS_LOG_FILE=jarvis.log` (default) writes to a file
+that **rotates** at 1 MB (3 backups); set `JARVIS_LOG_FILE=` for console only.
 
 ## Development
 
@@ -315,7 +339,7 @@ zee/
 ├── templates/
 │   └── index.html    # Browser UI
 ├── tests/            # Unit + web tests (pytest)
-├── audit/            # Approval audit log (approvals.jsonl, generated)
+├── approvals.log    # Approval audit log (JSON lines, generated)
 └── model/            # Vosk model (download, not included)
 ```
 

@@ -15,7 +15,7 @@ def isolate_state(tmp_path, monkeypatch):
     """Point all persistence (memory, approvals, audit) at a temp dir."""
     monkeypatch.setattr(jc, "_MEMORY_FILE", str(tmp_path / "memory.json"))
     monkeypatch.setattr(jc, "_APPROVAL_FILE", str(tmp_path / "pending_approvals.json"))
-    monkeypatch.setattr(jc, "_AUDIT_DIR", str(tmp_path / "audit"))
+    monkeypatch.setattr(jc, "_APPROVALS_LOG", str(tmp_path / "approvals.log"))
     jc._load_memory()
     jc._pending_approvals.clear()
     yield
@@ -195,12 +195,20 @@ def test_approval_expired():
 
 
 def test_approval_audit_log(tmp_path):
-    pending = jc.request_approval("kill_process", {"name": "notepad"})
-    jc.deny_action(pending["id"])
-    audit_file = tmp_path / "audit" / "approvals.jsonl"
-    lines = audit_file.read_text(encoding="utf-8").strip().splitlines()
-    events = [json.loads(entry)["event"] for entry in lines]
-    assert "requested" in events and "denied" in events
+    """Approval lifecycle events land in approvals.log as JSON lines."""
+    pending = jc.request_approval("kill_process", {"name": "notepad"}, actor="user1")
+    jc.deny_action(pending["id"], actor="user1")
+    audit_file = tmp_path / "approvals.log"
+    lines = [line for line in audit_file.read_text(encoding="utf-8").strip().splitlines() if line]
+    assert lines, "approvals.log should have at least one line"
+    events = [json.loads(entry) for entry in lines]
+    statuses = [ev["status"] for ev in events]
+    assert "requested" in statuses and "denied" in statuses
+    for ev in events:
+        assert set(ev) >= {"timestamp", "id", "action", "args", "expires", "status", "actor"}
+        assert ev["action"] == "kill_process"
+        assert json.loads(ev["args"]) == {"name": "notepad"}
+    assert events[-1]["actor"] == "user1"
 
 
 def test_maybe_request_approval_phrases():

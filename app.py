@@ -1,4 +1,5 @@
 import hmac
+import hashlib
 import ipaddress
 import json
 import os
@@ -100,12 +101,19 @@ class _RateLimiter:
             return True
 
 
-RATE_LIMIT_PER_MIN = int(os.getenv("JARVIS_RATE_LIMIT", "30"))
+RATE_LIMIT_PER_MIN = int(os.getenv("JARVIS_RATE_LIMIT", "10"))
 _ask_limiter = _RateLimiter(RATE_LIMIT_PER_MIN, 60)
 
 
 def _client_key():
-    return request.remote_addr or "local"
+    """Rate-limit bucket key: per authenticated token (hashed), else per IP."""
+    given = request.headers.get("X-JARVIS-Token", "")
+    header = request.headers.get("Authorization", "")
+    if header.startswith("Bearer "):
+        given = header[7:]
+    if _token and given:
+        return "tok:" + hashlib.sha256(given.encode("utf-8")).hexdigest()
+    return f"ip:{request.remote_addr or 'local'}"
 
 
 def _clean_text(text):
@@ -162,11 +170,11 @@ def ensure_cert():
     log.info(f"Generated self-signed certificate for localhost and {_lan_ip()}")
 
 
-def _stream_reply(text):
+def _stream_reply(text, actor="web"):
     """Generator: yields NDJSON lines (delta / approval / done) as the model replies."""
-    log.info(f"[ask] text={text!r}")
+    log.info(f"[ask] text={text!r} actor={actor}")
     try:
-        stream = jarvis_core.StreamAsk(text)
+        stream = jarvis_core.StreamAsk(text, actor=actor)
         for delta in stream:
             yield json.dumps({"delta": delta}) + "\n"
         if stream.approval:
@@ -209,6 +217,8 @@ def health():
         "status": "ok" if ready else "degraded",
         "ready": ready,
         "ollama": ollama_ok,
+        "ollama_detail": jarvis_core.ollama_probe(),
+        "automation_enabled": jarvis_core.automation_enabled(),
         "model_available": model_ok,
         "audio": jarvis_core.init_audio(),
         "model": jarvis_core.OLLAMA_MODEL,
@@ -234,7 +244,7 @@ def ask():
 
     m = re.fullmatch(r"open\s+(?:the\s+|a\s+)?(.{1,40})", text)
     if m and not re.search(r"(where|what|how|why|when|about|with|help|door|window)", m.group(1)):
-        result = jarvis_core.run_tool("open_app", {"app": m.group(1)})
+        result = jarvis_core.run_tool("open_app", {"app": m.group(1)}, actor="web")
         if result.get("opened") or result.get("opened_website"):
             reply = f"Opening {m.group(1).title()}."
             jarvis_core.speak(reply)
@@ -243,7 +253,7 @@ def ask():
                 mimetype="application/x-ndjson",
             )
 
-    return Response(_stream_reply(text), mimetype="application/x-ndjson")
+    return Response(_stream_reply(text, actor="web"), mimetype="application/x-ndjson")
 
 
 def _valid_approval_id(data):
@@ -257,7 +267,7 @@ def approve():
     action_id = _valid_approval_id(data)
     if not action_id:
         return jsonify({"error": "Invalid approval_id."}), 400
-    result = jarvis_core.approve_action(action_id)
+    result = jarvis_core.approve_action(action_id, actor="web")
     if "error" in result:
         return jsonify({"ok": False, "message": result["error"]}), 400
     message = _describe_result(result)
@@ -271,7 +281,7 @@ def deny():
     action_id = _valid_approval_id(data)
     if not action_id:
         return jsonify({"error": "Invalid approval_id."}), 400
-    jarvis_core.deny_action(action_id)
+    jarvis_core.deny_action(action_id, actor="web")
     jarvis_core.speak("Cancelled.")
     return jsonify({"ok": True, "message": "Action cancelled."})
 

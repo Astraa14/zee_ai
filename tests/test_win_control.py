@@ -4,6 +4,8 @@ On non-Windows platforms we verify graceful degradation. On Windows we
 verify input validation and safe failure paths only — never actually
 launching apps, killing processes or driving Discord.
 """
+import os
+
 import pytest
 
 import win_control as wc
@@ -86,14 +88,18 @@ def test_open_app_validation(monkeypatch):
 
 
 def test_open_app_fuzzy_shortcut_match(monkeypatch):
-    """User's word as a substring of an installed shortcut name is allowed."""
+    """User's word as a substring of an installed shortcut name is allowed.
+
+    .lnk targets are opened with os.startfile (raising=False so this passes on
+    Linux CI too, where os.startfile does not exist).
+    """
     monkeypatch.setattr("os.name", "nt")
     _fixed_index(monkeypatch)
-    started = []
-    monkeypatch.setattr(wc, "_start", lambda target: started.append(target))
+    opened = []
+    monkeypatch.setattr(os, "startfile", lambda target: opened.append(target), raising=False)
     result = wc.tool_open_app("steam")
     assert result.get("via") == "installed app"
-    assert started == [r"C:\Program Files (x86)\Steam\steam.exe.lnk"]
+    assert opened == [r"C:\Program Files (x86)\Steam\steam.exe.lnk"]
 
 
 def test_open_app_known_goes_to_launcher(monkeypatch):
@@ -105,6 +111,66 @@ def test_open_app_known_goes_to_launcher(monkeypatch):
     assert started == ["notepad"]
     result = wc.tool_open_app("YouTube")
     assert result.get("opened_website") == "https://www.youtube.com"
+
+
+def test_messenger_and_discord_require_automation(monkeypatch):
+    """Messenger search/contact automation is opt-in (JARVIS_ALLOW_AUTOMATION=1)."""
+    monkeypatch.setattr("os.name", "nt")
+    monkeypatch.delenv("JARVIS_ALLOW_AUTOMATION", raising=False)
+
+    assert "Automation disabled" in wc.tool_discord_contact("John Doe")["error"]
+    assert "Automation disabled" in wc.tool_discord_call("John Doe")["error"]
+    assert "Automation disabled" in wc.tool_open_messenger_search("John Doe")["error"]
+    assert "Automation disabled" in wc.tool_open_messenger_search()["error"]
+    # open_app for messenger also goes through the gate
+    assert "Automation disabled" in wc.tool_open_app("messenger")["error"]
+    assert "Automation disabled" in wc.tool_open_app("facebook messages")["error"]
+    assert "Automation disabled" in wc.tool_open_app("messenger search for John Doe")["error"]
+
+def test_open_messenger_search_url(monkeypatch):
+    """With automation on, a valid name produces a search URL."""
+    monkeypatch.setenv("JARVIS_ALLOW_AUTOMATION", "1")
+    opened = []
+    monkeypatch.setattr(wc, "open_url", lambda url: opened.append(url) or None)
+    result = wc.tool_open_messenger_search("John Doe")
+    assert result.get("opened") == "https://www.messenger.com/search?q=John%20Doe"
+    assert opened == ["https://www.messenger.com/search?q=John%20Doe"]
+
+
+def test_open_messenger_search_rejects_injection(monkeypatch):
+    """Shell metacharacters and oversized inputs never reach a URL."""
+    monkeypatch.setenv("JARVIS_ALLOW_AUTOMATION", "1")
+    opened = []
+    monkeypatch.setattr(wc, "open_url", lambda url: opened.append(url) or None)
+    for bad in ("John; del C:\\", "John & rm", "$(whoami)", "name " * 100):
+        result = wc.tool_open_messenger_search(bad)
+        assert "error" in result, bad
+    assert opened == []
+
+
+def test_sanitize_input_rejects_dangerous_chars():
+    assert wc.sanitize_input("ls -la") == "ls -la"
+    for bad in ("a;b", "a&b", "a|b", "a`b", "a$b", "a\nb", "a\rb"):
+        assert wc.sanitize_input(bad) is None, bad
+    assert wc.sanitize_input(None) is None
+    assert wc.sanitize_input("") is None
+    assert wc.sanitize_input("x" * 121) is None
+    assert wc.sanitize_input("x" * 120) == "x" * 120
+
+
+def test_safe_run_never_shell_and_timeouts(monkeypatch):
+    """safe_run always passes a list and returns a tuple."""
+    res = wc.safe_run(["python", "-c", "print('hi')"])
+    assert res[0] == 0
+    assert "hi" in res[1]
+    # timeout path returns None code with an error message
+    res2 = wc.safe_run(["python", "-c", "import time; time.sleep(99)"], timeout=1)
+    assert res2[0] is None
+    assert "timed out" in res2[2]
+    # missing binary reports an error, never raises
+    res3 = wc.safe_run(["definitely-not-a-real-binary-xyz"])
+    assert res3[0] is None
+    assert res3[2]
 
 
 def test_open_file_rejects_path_traversal_chars(monkeypatch):
