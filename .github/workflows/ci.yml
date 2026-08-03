@@ -37,7 +37,7 @@ jobs:
       - name: Import / smoke tests
         env:
           ZEE_HTTPS: "0"
-          ZEE_TOKEN: "ci-token"
+          ZEE_TOKEN: "ci-test-token"
         run: pytest -v
 
       - name: Doctor report
