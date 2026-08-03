@@ -1,4 +1,6 @@
 # GUI dependencies (zee gui / zee start)
-PySide6>=6.5
-PySide6-WebEngine>=6.5
+# QtWebEngine ships inside PySide6-Addons since PySide6 6.6.
+# Python 3.12 is the safest build target (PySide6 caps at <3.14).
+PySide6>=6.6
+PySide6-Addons>=6.6
 requests>=2.30

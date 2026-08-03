@@ -98,7 +98,7 @@ background **daemon**, and optionally raises a small **PySide6 tray app** that
 embeds the web UI:
 
 ```sh
-pip install -r requirements-gui.txt      # optional: GUI needs PySide6 + WebEngine
+pip install -r requirements-gui.txt      # optional: GUI needs PySide6 + QtWebEngine
 
 python zee.py daemon          # background service: API + voice loop, no window
 python zee.py gui             # GUI only (daemon must already be running)

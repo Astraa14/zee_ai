@@ -4,9 +4,10 @@ A small PySide6 window that embeds the local web UI
 (``https://127.0.0.1:5000``), stays in the system tray when hidden and
 raises itself when the voice loop broadcasts a wake event over ``/events``.
 
-Run with ``zee gui`` or ``zee start``. Requires PySide6 + PySide6-WebEngine:
+Run with ``zee gui`` or ``zee start``. Requires PySide6 + PySide6-Addons
+(QtWebEngine):
 
-    pip install PySide6 PySide6-WebEngine
+    pip install PySide6 PySide6-Addons
 """
 import json
 import os
