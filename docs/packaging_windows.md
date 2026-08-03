@@ -69,6 +69,24 @@ diagnostics.
   `ZEE_VOICE`) for the next daemon start.
 - Automation stays **off** until `ZEE_ALLOW_AUTOMATION=1`.
 
+## Self-update
+
+`POST /update` (token-protected) kicks off a background update from either a
+manifest URL or a direct asset URL + `sha256`:
+
+```json
+{"manifest": "https://example.com/zee/latest.json"}
+{"url": "https://example.com/Zee-Setup-1.0.2.exe", "sha256": "<hex>"}
+```
+
+The manifest is plain JSON: `{"version": "...", "url": "...", "sha256": "..."}`.
+The payload is downloaded to a temp dir, **SHA-256 verified**, then applied:
+a `*Setup*.exe` runs silently (Inno `/VERYSILENT /SUPPRESSMSGBOXES` — it
+upgrades in place over the same AppId), any other file is atomically swapped
+for `Zee.exe` (takes effect next start). `python -m updater --manifest <url> --apply`
+does the same from the command line. Keep a manifest at a stable URL and
+publish new installer artifacts there when tagging releases.
+
 ## Code signing
 
 Recommended before distribution; without a certificate Windows SmartScreen

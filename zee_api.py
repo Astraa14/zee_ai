@@ -68,7 +68,7 @@ def _authorized():
 
 @app.before_request
 def _require_auth():
-    if request.method == "POST" and request.path in ("/ask", "/approve", "/deny", "/shutdown"):
+    if request.method == "POST" and request.path in ("/ask", "/approve", "/deny", "/shutdown", "/update"):
         if not _authorized():
             return jsonify({"error": "Unauthorized. Provide a valid access token."}), 401
 
@@ -237,6 +237,43 @@ def shutdown():
     else:
         threading.Thread(target=_force_stop, daemon=True).start()
     return jsonify({"ok": True, "message": "ZEE daemon stopping."})
+
+
+@app.route("/update", methods=["POST"])
+def update():
+    """Kick off a self-update in the background (token-protected).
+
+    Body: ``{"manifest": "https://.../latest.json"}`` or
+    ``{"url": "https://.../asset.exe", "sha256": "<hex>"}``.
+    Downloads + verifies + applies (silent installer, or exe swap for
+    bare binaries). Returns 202 immediately; the daemon keeps running.
+    """
+    data = request.get_json(silent=True) or {}
+    manifest = data.get("manifest")
+    url = data.get("url")
+    sha256 = data.get("sha256")
+    if manifest:
+        if not isinstance(manifest, str) or not manifest.startswith(("http://", "https://")):
+            return jsonify({"error": "'manifest' must be an http(s) URL."}), 400
+        target = manifest
+    elif url:
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            return jsonify({"error": "'url' must be an http(s) URL."}), 400
+        target = url
+    else:
+        return jsonify({"error": "Provide 'manifest' or 'url' (+ 'sha256')."}), 400
+
+    def _run():
+        import updater
+        try:
+            result = updater.run_update(target, sha256=sha256 or None)
+            log.info("Update finished: %s", result)
+        except Exception as e:  # noqa: BLE001 — report, never crash the daemon
+            log.error(f"Update failed: {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+    log.info("Update started: %s", target)
+    return jsonify({"ok": True, "message": "Update started in the background."}), 202
 
 
 def _force_stop():

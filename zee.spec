@@ -18,7 +18,7 @@ block_cipher = None
 hiddenimports = (
     collect_submodules("flask")
     + ["zee_core", "zee_voice", "zee_api", "events", "win_control",
-       "apppaths", "tokenstore", "tools.install_autostart"]
+       "apppaths", "tokenstore", "updater", "tools.install_autostart"]
 )
 
 datas = [
