@@ -20,13 +20,18 @@ pip install -r requirements.txt -r requirements-gui.txt -r requirements-dev.txt
 ## Build commands
 
 ```bat
-REM 1. PyInstaller onedir bundle + (if Inno is installed) the installer:
+REM 1. PyInstaller onedir bundle, smoke-test it, then the installer:
 scripts\build_windows.bat
 
 REM ...or step by step:
 pyinstaller --noconfirm --clean zee.spec
+dist\Zee\Zee.exe doctor     ; smoke test: exits 0 when deps are healthy
 iscc scripts\make_installer.iss
 ```
+
+`build_windows.bat` runs `Zee.exe doctor` on the freshly built bundle to
+catch a broken exe before packaging. Set `ZEE_ONEFILE=1` to also produce a
+single-file `dist\Zee.exe` alongside the onedir bundle.
 
 Outputs:
 
@@ -53,12 +58,20 @@ writable moves to `%APPDATA%\Zee`:
 
 ## Vosk model (voice loop)
 
-The model is excluded from the installer. After installing, download one
-from <https://alphacephei.com/vosk/models> (e.g.
-`vosk-model-small-en-us-0.15`, ~40 MB) and unpack it to
-`%APPDATA%\Zee\model` (i.e. the folder that contains `am/`, `conf/`, ...).
+The model is excluded from the installer — bundling a speech model would
+roughly triple the download size. After installing, download one from
+<https://alphacephei.com/vosk/models> (e.g. `vosk-model-small-en-us-0.15`,
+~40 MB) and unpack it to `%APPDATA%\Zee\model` (i.e. the folder that contains
+`am/`, `conf/`, ...), or run the optional installer:
+
+```bat
+Zee.exe install-model
+Zee.exe install-model --model vosk-model-small-en-us-0.15
+Zee.exe install-model --url https://.../vosk-model-en-us-0.22.tar.gz
+```
+
 Without it the API/GUI still work — only the wake-word loop refuses to start.
-`Zee.exe daemon` will log a clear message. Run `Zee.exe --help`/doctor for
+`Zee.exe daemon` will log a clear message. Run `Zee.exe doctor` for
 diagnostics.
 
 ## First run
@@ -83,9 +96,18 @@ The manifest is plain JSON: `{"version": "...", "url": "...", "sha256": "..."}`.
 The payload is downloaded to a temp dir, **SHA-256 verified**, then applied:
 a `*Setup*.exe` runs silently (Inno `/VERYSILENT /SUPPRESSMSGBOXES` — it
 upgrades in place over the same AppId), any other file is atomically swapped
-for `Zee.exe` (takes effect next start). `python -m updater --manifest <url> --apply`
-does the same from the command line. Keep a manifest at a stable URL and
-publish new installer artifacts there when tagging releases.
+for `Zee.exe`. Because Windows can't overwrite a running image, the swap
+technically takes effect on the next start — to apply immediately from a
+detached process, stop the daemon first via the protected `POST /shutdown`:
+
+```bat
+python -m updater --manifest https://example.com/zee/latest.json --shutdown --restart
+```
+
+`--shutdown` POSTs `/shutdown` (token-protected, same `ZEE_TOKEN`) so the
+running exe is free to replace, and `--restart` relaunches `<exe> daemon`
+afterward. Keep a manifest at a stable URL and publish new installer artifacts
+there when tagging releases.
 
 ## Code signing
 

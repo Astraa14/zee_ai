@@ -7,3 +7,7 @@ ruff>=0.5
 black>=23.1
 wheel
 pywin32>=305; sys_platform == "win32"
+# GUI test host (PySide6-Addons ships QtWebEngine). Required only when
+# running the desktop GUI tests / building the packaged exe.
+PySide6>=6.6
+PySide6-Addons>=6.6

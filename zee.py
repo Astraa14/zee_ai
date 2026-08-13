@@ -170,6 +170,23 @@ def cmd_install_autostart(args):
     return install_autostart(with_gui=args.gui)
 
 
+def cmd_install_model(args):
+    """Download the optional Vosk model into the data dir (not bundled)."""
+    from tools.download_vosk_model import install
+    install(model=args.model, url=args.url)
+    return 0
+
+
+def cmd_doctor():
+    """Run the dependency/doctor report (used to smoke-test the bundle)."""
+    from zee_core import doctor, doctor_summary, log, setup_logging
+    setup_logging()
+    report = doctor()
+    for line in doctor_summary(report):
+        log.info(f"[doctor] {line}")
+    return 0 if report["healthy"] else 1
+
+
 def main(argv=None):
     load_config()
     parser = argparse.ArgumentParser(prog="zee", description="ZEE local assistant")
@@ -178,9 +195,15 @@ def main(argv=None):
     sub.add_parser("gui", help="run only the desktop GUI")
     sub.add_parser("start", help="start daemon in background, then open GUI")
     sub.add_parser("stop", help="stop the running daemon")
+    sub.add_parser("doctor", help="run the dependency/doctor report and exit")
     autostart = sub.add_parser("install-autostart", help="register ZEE at login")
     autostart.add_argument("--gui", action="store_true",
                            help="also autostart the desktop GUI window")
+    model = sub.add_parser("install-model",
+                           help="download the optional Vosk voice model")
+    model.add_argument("--model", default="vosk-model-small-en-us-0.15",
+                       help="model name on alphacephei.com")
+    model.add_argument("--url", help="direct .tar.gz URL (overrides --model)")
     args = parser.parse_args(argv)
 
     if args.command == "daemon":
@@ -191,8 +214,12 @@ def main(argv=None):
         cmd_start()
     elif args.command == "stop":
         sys.exit(cmd_stop())
+    elif args.command == "doctor":
+        sys.exit(cmd_doctor())
     elif args.command == "install-autostart":
         sys.exit(cmd_install_autostart(args) or 0)
+    elif args.command == "install-model":
+        sys.exit(cmd_install_model(args) or 0)
     return 0
 
 

@@ -44,3 +44,36 @@ jobs:
         env:
           ZEE_HTTPS: "0"
         run: python zee_core.py --doctor || true
+
+  packaging:
+    name: packaging smoke (PyInstaller onedir)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: pip install -r requirements-core.txt -r requirements-dev.txt
+
+      - name: Validate zee.spec syntax + bundled assets
+        run: |
+          python - <<'EOF'
+          import ast, os
+          ast.parse(open("zee.spec", encoding="utf-8").read())
+          for path in ("templates/index.html", "scripts/build_windows.bat",
+                       "scripts/make_installer.iss"):
+              assert os.path.isfile(path), f"missing {path}"
+          print("spec + assets OK")
+          EOF
+
+      - name: PyInstaller onedir build (headless smoke)
+        env:
+          ZEE_SMOKE_BUILD: "1"
+        run: |
+          python -m PyInstaller --noconfirm --clean zee.spec
+          test -d dist/Zee
+          test -f dist/Zee/zee || test -f dist/Zee/Zee
+          echo "onedir bundle OK"

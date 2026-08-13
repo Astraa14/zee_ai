@@ -157,45 +157,36 @@ def test_rate_limit_is_per_token(client, monkeypatch):
 
 # ---------------- health endpoint ----------------
 def test_health_ok(client, monkeypatch):
-    monkeypatch.setattr(zee_core, "check_ollama", lambda: True)
-    monkeypatch.setattr(zee_core.ollama, "show", lambda model: True)
+    monkeypatch.setattr(zee_core, "ollama_probe", lambda: "ok")
     resp = client.get("/health")
     assert resp.status_code == 200
     data = resp.get_json()
-    assert data["status"] == "ok" and data["ready"] is True
-    assert data["ollama"] is True and data["model_available"] is True
-    assert "automation_enabled" in data
+    assert data["ok"] is True and data["ollama"] == "ok"
     assert data["automation_enabled"] is False
 
 
 def test_health_reports_automation_when_enabled(client, monkeypatch):
-    monkeypatch.setattr(zee_core, "check_ollama", lambda: True)
-    monkeypatch.setattr(zee_core.ollama, "show", lambda model: True)
-    monkeypatch.setattr(zee_core, "automation_enabled", lambda: True)
     monkeypatch.setattr(zee_core, "ollama_probe", lambda: "ok")
+    monkeypatch.setattr(zee_core, "automation_enabled", lambda: True)
     data = client.get("/health").get_json()
     assert data["automation_enabled"] is True
-    assert data["ollama_detail"] == "ok"
+    assert data["ollama"] == "ok"
 
 
 def test_health_degraded_when_ollama_down(client, monkeypatch):
-    monkeypatch.setattr(zee_core, "check_ollama", lambda: False)
+    monkeypatch.setattr(zee_core, "ollama_probe", lambda: "unavailable")
     resp = client.get("/health")
     assert resp.status_code == 503
     data = resp.get_json()
-    assert data["status"] == "degraded" and data["ready"] is False
+    assert data["ok"] is False and data["ollama"] == "unavailable"
 
 
-def test_health_degraded_when_model_missing(client, monkeypatch):
-    monkeypatch.setattr(zee_core, "check_ollama", lambda: True)
-
-    def no_model(model):
-        raise RuntimeError("model not found")
-
-    monkeypatch.setattr(zee_core.ollama, "show", no_model)
+def test_health_degraded_when_ollama_errors(client, monkeypatch):
+    monkeypatch.setattr(zee_core, "ollama_probe", lambda: "connection refused")
     resp = client.get("/health")
     assert resp.status_code == 503
-    assert resp.get_json()["model_available"] is False
+    data = resp.get_json()
+    assert data["ok"] is False and data["ollama"] == "connection refused"
 
 
 # ---------------- open fast-path ----------------

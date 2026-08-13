@@ -79,12 +79,24 @@ def handle_brain(text):
     return None
 
 
+def broadcast_event(payload):
+    """Emit an SSE event to every connected client (GUI raises on wake).
+
+    payload is a JSON-serializable dict, e.g. ``{"type": "wake", "text": ...}``.
+    Best-effort: failures are logged by events.broadcast, never raised.
+    """
+    events.broadcast(payload)
+
+
 def _broadcast_wake(text):
     import time
-    events.broadcast({
+    now = time.time()
+    broadcast_event({
         "type": "wake",
         "phrase": text,
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "text": text,
+        "ts": now,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now)),
     })
 
 

@@ -6,6 +6,7 @@ import logging
 import logging.handlers
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import threading
@@ -13,6 +14,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+import webbrowser
 
 import edge_tts
 import ollama
@@ -63,6 +65,97 @@ def setup_logging():
 
 
 setup_logging()
+
+
+# ==========================================
+# CORE SAFETY HELPERS
+# ==========================================
+MAX_ARG_LEN = 1000
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+# Rejected outright in subprocess-bound / sensitive inputs.
+_DANGEROUS_CHARS_RE = re.compile(r"[\n\r;|`$&<>]")
+
+
+def sanitize_input(text, max_len=120):
+    """Strict sanitizer for user-controlled strings bound for subprocess/URLs.
+
+    Returns the trimmed, cleaned string, or None when the input is unsafe:
+    empty, longer than max_len, contains control characters, or any of
+    ; \\n \\r & | ` $ < >.
+    """
+    if text is None:
+        return None
+    s = str(text).strip()
+    if not s or len(s) > max_len:
+        return None
+    if _CONTROL_CHARS_RE.search(s) or _DANGEROUS_CHARS_RE.search(s):
+        return None
+    return s
+
+
+def clean_text(s, maxlen=MAX_ARG_LEN):
+    """Soft cleaner: strip control characters and cap the length. Never rejects."""
+    s = "" if s is None else str(s)
+    s = _CONTROL_CHARS_RE.sub("", s)
+    return s[:maxlen].strip()
+
+
+def safe_run(cmd_list, timeout=10):
+    """Run a command list with subprocess.run, never through a shell.
+
+    Always passes an explicit argument list, captures both stdout and stderr,
+    enforces a timeout, and returns a dict of {returncode, stdout, stderr}
+    instead of raising. On failure, returncode is None and stderr carries the
+    error message. Errors are logged.
+    """
+    try:
+        res = subprocess.run(
+            cmd_list,
+            timeout=timeout,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode != 0:
+            log.warning(f"safe_run exit {res.returncode}: {cmd_list!r}")
+        return {"returncode": res.returncode, "stdout": res.stdout, "stderr": res.stderr}
+    except subprocess.TimeoutExpired:
+        log.error(f"safe_run timed out after {timeout}s: {cmd_list!r}")
+        return {"returncode": None, "stdout": None, "stderr": f"timed out after {timeout}s"}
+    except Exception as e:
+        log.error(f"safe_run failed: {cmd_list!r}: {e}")
+        return {"returncode": None, "stdout": None, "stderr": str(e)}
+
+
+def open_url_in_browser(url):
+    """Open an http/https URL in the default browser (cross-platform).
+
+    Validates the scheme/netloc with urllib.parse, then uses webbrowser.open.
+    Falls back to platform-specific commands (cmd start / open / xdg-open)
+    only when webbrowser.open is unavailable. Returns None on success, else an
+    error string.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        log.error(f"open_url_in_browser: refusing non-http(s) URL {url!r}")
+        return f"Refusing to open non-http(s) URL: {url!r}"
+    try:
+        if webbrowser.open(url):
+            return None
+        log.warning("webbrowser.open returned False for %r; falling back", url)
+    except Exception as e:
+        log.warning(f"webbrowser.open({url!r}) raised {e}; falling back")
+    if os.name == "nt":
+        opener = ["cmd", "/c", "start", "", url]
+    elif sys.platform == "darwin":
+        opener = ["open", url]
+    else:
+        opener = ["xdg-open", url]
+    res = safe_run(opener, timeout=10)
+    if res["returncode"] in (0, 1):
+        return None
+    return res["stderr"] or f"browser open failed (exit {res['returncode']})"
+
 
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:latest")
 ZEE_VOICE = os.getenv("ZEE_VOICE", "en-US-ChristopherNeural")
@@ -256,14 +349,6 @@ def speak(text, wait=False):
         threading.Thread(target=worker, daemon=True).start()
 
 
-# ==========================================
-# INPUT SANITIZATION + TOOL ARG FILTERING
-# ==========================================
-MAX_ARG_LEN = 1000
-_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
-# Rejected outright in subprocess-bound / sensitive inputs.
-_DANGEROUS_CHARS_RE = re.compile(r"[\n\r;|`$&]")
-
 # Desktop/browser automation (Discord, messenger search, ...) is opt-in.
 AUTOMATION_ENABLED = os.getenv("ZEE_ALLOW_AUTOMATION", "0") == "1"
 AUTOMATION_DISABLED_MSG = "Automation disabled; set ZEE_ALLOW_AUTOMATION=1 to enable"
@@ -277,30 +362,6 @@ def automation_enabled():
 def automation_denied():
     """Error dict returned by automation tools when the opt-in flag is off."""
     return {"error": AUTOMATION_DISABLED_MSG}
-
-
-def sanitize_input(text, maxlen=120):
-    """Strict sanitizer for user-controlled strings bound for subprocess/URLs.
-
-    Returns the trimmed, cleaned string, or None when the input is unsafe:
-    empty, longer than maxlen, contains control characters, or any of
-    ; & | ` $ and newlines.
-    """
-    if text is None:
-        return None
-    s = str(text).strip()
-    if not s or len(s) > maxlen:
-        return None
-    if _CONTROL_CHARS_RE.search(s) or _DANGEROUS_CHARS_RE.search(s):
-        return None
-    return s
-
-
-def clean_text(s, maxlen=MAX_ARG_LEN):
-    """Soft cleaner: strip control characters and cap the length. Never rejects."""
-    s = "" if s is None else str(s)
-    s = _CONTROL_CHARS_RE.sub("", s)
-    return s[:maxlen].strip()
 
 
 def _filter_args(func, args):
@@ -561,16 +622,18 @@ def _iso(ts):
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%dT%H:%M:%S")
 
 
-def _append_approval(status, approval_id, name, args, expires=None, actor="unknown"):
+def _append_approval(status, approval_id, name, args, expires=None, actor="unknown",
+                     result=None):
     """Append one JSON line to approvals.log (audit trail)."""
     entry = {
         "timestamp": _iso(time.time()),
         "id": approval_id,
         "action": name,
-        "args": json.dumps(args, ensure_ascii=False),
+        "args": json.dumps(args, ensure_ascii=False) if args is not None else None,
         "expires": _iso(expires) if expires else None,
         "status": status,
         "actor": actor,
+        "result": result,
     }
     try:
         with open(_APPROVALS_LOG, "a", encoding="utf-8") as f:
@@ -630,18 +693,14 @@ def request_approval(name, args, actor="unknown"):
     _save_pending_approvals()
     _append_approval("requested", aid, name, args, now + _APPROVAL_TTL, actor)
     log.warning(f"Approval requested: {name}({json.dumps(args)}) [id={aid}, actor={actor}]")
-    try:
-        import events
-        events.broadcast({
-            "type": "approval",
-            "id": aid,
-            "action": name,
-            "args": args,
-            "expires": round(now + _APPROVAL_TTL, 3),
-            "actor": actor,
-        })
-    except Exception:
-        pass
+    _broadcast_approval({
+        "type": "approval",
+        "id": aid,
+        "action": name,
+        "args": args,
+        "expires": round(now + _APPROVAL_TTL, 3),
+        "actor": actor,
+    })
     return {
         "needs_approval": True,
         "id": aid,
@@ -680,27 +739,41 @@ def approve_action(action_id, actor="unknown"):
         item = _pending_approvals.pop(action_id, None)
     if item is None:
         _save_pending_approvals()
-        _append_approval("approve_missing", action_id, None, None, None, actor)
-        return {"error": "Approval expired or not found."}
+        result = {"error": "Approval expired or not found."}
+        _append_approval("approve_missing", action_id, None, None, None, actor, result)
+        return result
     if item.get("expires", 0) < time.time():
         _save_pending_approvals()
+        result = {"error": "Approval expired."}
         _append_approval("expired", action_id, item.get("name"),
-                         item.get("args"), item.get("expires"), actor)
-        return {"error": "Approval expired."}
+                         item.get("args"), item.get("expires"), actor, result)
+        return result
     _save_pending_approvals()
     func = _TOOL_FUNCS.get(item["name"])
     if not func:
+        result = {"error": f"Unknown tool: {item['name']}"}
         _append_approval("approved_failed", action_id, item.get("name"),
-                         item.get("args"), item.get("expires"), actor)
-        return {"error": f"Unknown tool: {item['name']}"}
+                         item.get("args"), item.get("expires"), actor, result)
+        return result
     try:
         result = func(**_filter_args(func, item["args"])) if item["args"] else func()
     except Exception as e:
         result = {"error": f"{item['name']} failed: {e}"}
     _append_approval("approved", action_id, item["name"], item["args"],
-                     item.get("expires"), actor)
+                     item.get("expires"), actor, result)
     log.info(f"[approved] {item['name']}({json.dumps(item['args'])}) -> {json.dumps(result)}")
+    _broadcast_approval({"type": "approval_result", "id": action_id,
+                         "status": "approved", "action": item["name"], "result": result})
     return result
+
+
+def _broadcast_approval(payload):
+    """Push an approval event to SSE subscribers (best-effort, never crash)."""
+    try:
+        import events
+        events.broadcast(payload)
+    except Exception:
+        pass
 
 
 def deny_action(action_id, actor="unknown"):
@@ -710,8 +783,12 @@ def deny_action(action_id, actor="unknown"):
     if item is not None:
         _save_pending_approvals()
         _append_approval("denied", action_id, item.get("name"),
-                         item.get("args"), item.get("expires"), actor)
+                         item.get("args"), item.get("expires"), actor,
+                         {"denied": True})
         log.info(f"[denied] {item.get('name')}({json.dumps(item.get('args'))}) [id={action_id}]")
+        _broadcast_approval({"type": "approval_result", "id": action_id,
+                             "status": "denied", "action": item.get("name"),
+                             "result": {"denied": True}})
     return {"denied": True}
 
 
@@ -1292,6 +1369,9 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--doctor":
         report = doctor()
         for line in doctor_summary(report):
-            print(line)
-        print("HEALTHY" if report["healthy"] else "PROBLEMS DETECTED")
+            log.info(line)
+        if report["healthy"]:
+            log.info("HEALTHY")
+        else:
+            log.error("PROBLEMS DETECTED")
         sys.exit(0 if report["healthy"] else 1)

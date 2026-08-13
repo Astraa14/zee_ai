@@ -43,6 +43,18 @@ def test_ask_returns_401_json(client):
     assert "error" in resp.get_json()
 
 
+def test_no_token_allows_localhost_denies_lan(client, monkeypatch):
+    """Without a token, localhost (dev mode) is allowed but LAN requests 401."""
+    monkeypatch.setattr(api_module, "_token", "")
+    resp = _post(client, "/ask", {"text": "hi"})
+    assert resp.status_code == 200
+    # Simulate a request from a remote address → must be rejected.
+    monkeypatch.setattr(api_module, "_loopback", lambda: False)
+    resp = _post(client, "/ask", {"text": "hi"})
+    assert resp.status_code == 401
+    assert "error" in resp.get_json()
+
+
 # ---------------- /approve / /deny ----------------
 def test_approve_requires_token(client):
     resp = _post(client, "/approve", {"approval_id": "a" * 16})

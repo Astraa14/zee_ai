@@ -25,7 +25,7 @@ log = logging.getLogger("zee.win")
 
 MAX_ARG_LEN = 1000
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
-_DANGEROUS_CHARS_RE = re.compile(r"[\n\r;|`$&]")
+_DANGEROUS_CHARS_RE = re.compile(r"[\n\r;|`$&<>]")
 _SAFE_APP_NAME_RE = re.compile(r"[a-z0-9 ._\-]{1,40}")
 _SAFE_DOMAIN_RE = re.compile(r"[a-z0-9\-]+(\.[a-z0-9\-]+)+")
 _PATH_CHARS_RE = re.compile(r"[\\/:*?\"<>|]")
@@ -213,6 +213,8 @@ def tool_open_app(app: str):
         _start(target)
         return {"opened_website": target}
     if trusted:
+        if not _automation_enabled():
+            return automation_denied()
         if target.lower().endswith(".lnk"):
             try:
                 os.startfile(target)
@@ -269,13 +271,8 @@ def _open_path(path):
     if os.name == "nt":
         os.startfile(path)
         return None
-    opener = _posix_opener()
-    try:
-        subprocess.run([opener, path], timeout=15,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return None
-    except Exception as e:
-        return f"{e}"
+    code, _, err = safe_run([_posix_opener(), path], timeout=15)
+    return None if code in (0, 1) else (err or f"open failed (exit {code})")
 
 
 def tool_open_file(name: str):
@@ -312,6 +309,8 @@ def tool_open_file(name: str):
 
 
 def tool_open_folder(path: str):
+    if not _automation_enabled():
+        return automation_denied()
     if os.name != "nt":
         # POSIX: still support opening paths via the OS file manager.
         path = _clean_text(path, 500)
@@ -342,7 +341,9 @@ def tool_open_folder(path: str):
 
 def _discord_sendkeys(keys):
     """Activate the Discord window and send keystrokes via WScript.Shell."""
-    keys = _clean_text(keys, 50)
+    keys = sanitize_input(keys, 50)
+    if keys is None:
+        return "error: invalid keys"
     safe = keys.replace("'", "''")
     script = (
         "$p = Get-Process Discord -ErrorAction SilentlyContinue | "
@@ -354,39 +355,34 @@ def _discord_sendkeys(keys):
         f"$ws.SendKeys('{safe}'); "
         "'ok' }"
     )
-    try:
-        out = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", script],
-            capture_output=True, text=True, timeout=20,
-        )
-        log.debug(f"discord sendkeys {keys!r} -> {out.stdout.strip()!r}")
-        return out.stdout.strip()
-    except Exception as e:
-        return f"error: {e}"
+    code, out, err = safe_run(["powershell", "-NoProfile", "-Command", script], timeout=20)
+    if code is None:
+        return f"error: {err}"
+    log.debug(f"discord sendkeys {keys!r} -> {out.strip()!r}")
+    return out.strip()
 
 
 def _uia_click(button_name):
     """Click a Discord button by its accessibility name via UI Automation."""
-    button_name = _clean_text(button_name, 100).replace("'", "''")
+    button_name = sanitize_input(button_name, 100)
+    if button_name is None:
+        return False
+    safe = button_name.replace("'", "''")
     script = (
         "try { Add-Type -AssemblyName UIAutomationClient; "
         "Add-Type -AssemblyName UIAutomationTypes; "
         "$root = [System.Windows.Automation.AutomationElement]::RootElement; "
         "$cond = New-Object System.Windows.Automation.PropertyCondition("
         "[System.Windows.Automation.AutomationElement]::NameProperty, "
-        f"'{button_name}'); "
+        f"'{safe}'); "
         "$el = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond); "
         "if ($el) { $p = $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern); "
         "$p.Invoke(); 'clicked' } else { 'notfound' } } catch { 'notfound' }"
     )
-    try:
-        out = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", script],
-            capture_output=True, text=True, timeout=20,
-        )
-        return out.stdout.strip() == "clicked"
-    except Exception:
+    code, out, err = safe_run(["powershell", "-NoProfile", "-Command", script], timeout=20)
+    if code is None:
         return False
+    return out.strip() == "clicked"
 
 
 def tool_discord_contact(name: str, search: bool = False):
@@ -546,16 +542,17 @@ def tool_set_brightness(percent):
     pct = max(0, min(100, pct))
     cmd = ["powershell", "-NoProfile", "-Command",
            f"(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1,{pct})"]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-    except Exception as e:
-        return {"error": f"set_brightness failed: {e}"}
-    if result.returncode != 0:
+    code, _, err = safe_run(cmd, timeout=20)
+    if code is None:
+        return {"error": f"set_brightness failed: {err}"}
+    if code != 0:
         return {"error": "Brightness not supported on this system."}
     return {"brightness_percent": pct}
 
 
 def tool_screenshot():
+    if not _automation_enabled():
+        return automation_denied()
     from datetime import datetime
     from PIL import ImageGrab
     folder = os.path.join(os.getcwd(), "screenshots")
@@ -571,6 +568,8 @@ def tool_screenshot():
 def tool_type_text(text: str):
     if os.name != "nt":
         return {"error": "Typing is only supported on Windows."}
+    if not _automation_enabled():
+        return automation_denied()
     text = _clean_text(text, 1000)
     if not text:
         return {"error": "No text to type."}
@@ -590,6 +589,8 @@ _PROTECTED_PROCESSES = {
 
 
 def tool_kill_process(name: str):
+    if not _automation_enabled():
+        return automation_denied()
     try:
         import psutil
     except Exception as e:
@@ -627,19 +628,19 @@ _SYSTEM_ACTIONS = {
 def tool_system_action(action: str):
     if os.name != "nt":
         return {"error": "System actions are only supported on Windows."}
+    if not _automation_enabled():
+        return automation_denied()
     action = _clean_text(action, 20).lower()
     cmd = _SYSTEM_ACTIONS.get(action)
     if not cmd:
         return {"error": f"Unknown system action: {action!r}"}
-    try:
-        subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    except OSError as e:
-        return {"error": f"system_action failed: {e}"}
+    code, _, err = safe_run(cmd, timeout=15)
+    if code is None:
+        # sleep/hibernate may never report back before the machine changes state
+        if "timed out" in (err or ""):
+            return {"executed": action,
+                    "note": "command started; takes effect with the machine state change"}
+        return {"error": f"system_action failed: {err}"}
     return {"executed": action}
 
 

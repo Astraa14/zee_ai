@@ -58,8 +58,21 @@ pip install -r requirements.txt
 
 ### Download the Vosk model (for the voice loop only)
 
+The model is **not bundled** with the app (models are 40 MB–1.8 GB). Either
+download it manually or use the optional installer:
+
 ```sh
-# Download an English model from https://alphacephei.com/vosk/models
+python zee.py install-model                    # vosk-model-small-en-us-0.15
+python zee.py install-model --model vosk-model-small-en-us-0.15
+python zee.py install-model --url https://.../vosk-model-en-us-0.22.tar.gz
+```
+
+The model is unpacked into the writable data dir (`model/` in the project
+root from source; `%APPDATA%\Zee\model\` in an installed build) and picked up
+on the next daemon start. Manual option:
+
+```sh
+# Download from https://alphacephei.com/vosk/models
 # (e.g. vosk-model-small-en-us-0.15 ~40 MB, or vosk-model-en-us-0.22 ~1.8 GB for better accuracy)
 # Unpack it as a folder named "model" in the project root:
 ```
@@ -170,18 +183,16 @@ same report at startup. Server logs rotate in `zee.log`
 
 ### Health endpoint
 
-`GET /health` returns readiness JSON — `200` when Ollama and the model are
-reachable, `503` otherwise:
+`GET /health` returns readiness JSON — `200` when Ollama answers, `503`
+otherwise. `/health` is public (no token); it only reveals availability. If you
+don't want it exposed, block it in your firewall.
 
 ```json
-{"status": "ok", "ready": true, "ollama": true, "ollama_detail": "ok",
- "automation_enabled": false, "model_available": true,
- "audio": true, "model": "llama3.2:latest"}
+{"ok": true, "ollama": "ok", "automation_enabled": false}
 ```
 
-Useful for uptime monitors or restart scripts. Not behind the token (it only
-reveals availability); if you don't want it exposed, block it in your
-firewall or set `ZEE_TOKEN` and ignore it.
+`ollama` is `"ok"`, `"unavailable"`, or a short error string.
+`automation_enabled` reflects `ZEE_ALLOW_AUTOMATION`.
 
 ### Desktop voice loop
 
@@ -258,10 +269,12 @@ Pending approvals expire after 2 minutes (`ZEE_APPROVAL_TTL`), are
 **persisted to disk** (`zee_pending_approvals.json`, survives restarts), and can
 **never be replayed** — each approval id works exactly once. Every request,
 approval and denial is written in JSON-lines format to `zee_approvals.log` with
-`timestamp / id / action / args / expires / status / actor` (web calls are
-attributed to `web`, the voice loop to `voice`). System-critical
-processes (explorer, svchost, lsass, etc.) are always refused even when
-approved.
+`timestamp / id / action / args / expires / status / actor / result` (web calls
+are attributed to `web`, the voice loop to `voice`; `result` holds the tool
+output for `approved` and what was refused for `denied`/errors). The web UI and
+voice loop also hear live approval events over the `/events` SSE stream.
+System-critical processes (explorer, svchost, lsass, etc.) are always refused
+even when approved.
 
 Example commands to try:
 - `"set the volume to 30"`

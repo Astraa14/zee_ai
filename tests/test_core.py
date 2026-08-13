@@ -194,6 +194,25 @@ def test_approval_expired():
     assert "error" in result
 
 
+def test_approval_broadcasts_result(monkeypatch):
+    """approve/deny push an approval_result SSE event (best-effort)."""
+    seen = []
+    monkeypatch.setattr(jc, "_broadcast_approval", seen.append)
+    monkeypatch.setitem(jc._TOOL_FUNCS, "system_action",
+                        lambda **kw: {"executed": "lock"})
+
+    pending = jc.request_approval("system_action", {"action": "lock"}, actor="web")
+    jc.approve_action(pending["id"], actor="web")
+    statuses = [p["status"] for p in seen if p["type"] == "approval_result"]
+    assert "approved" in statuses
+
+    denied = jc.request_approval("system_action", {"action": "lock"}, actor="voice")
+    jc.deny_action(denied["id"], actor="voice")
+    statuses = [p["status"] for p in seen if p["type"] == "approval_result"]
+    assert "denied" in statuses
+    assert set(seen[-1]) == {"type", "id", "status", "action", "result"}
+
+
 def test_approval_audit_log(tmp_path):
     """Approval lifecycle events land in zee_approvals.log as JSON lines."""
     pending = jc.request_approval("kill_process", {"name": "notepad"}, actor="user1")
@@ -205,10 +224,12 @@ def test_approval_audit_log(tmp_path):
     statuses = [ev["status"] for ev in events]
     assert "requested" in statuses and "denied" in statuses
     for ev in events:
-        assert set(ev) >= {"timestamp", "id", "action", "args", "expires", "status", "actor"}
+        assert set(ev) >= {"timestamp", "id", "action", "args", "expires", "status", "actor", "result"}
         assert ev["action"] == "kill_process"
         assert json.loads(ev["args"]) == {"name": "notepad"}
     assert events[-1]["actor"] == "user1"
+    denied = [ev for ev in events if ev["status"] == "denied"][0]
+    assert denied["result"] == {"denied": True}
 
 
 def test_maybe_request_approval_phrases():

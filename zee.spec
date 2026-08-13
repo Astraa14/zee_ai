@@ -10,20 +10,33 @@
 # install, drop it in %APPDATA%\Zee\model (see docs/packaging_windows.md).
 #
 # PySide6 + QtWebEngine ship their own PyInstaller hooks, which collect
-# QtWebEngineProcess.exe and its resources automatically.
-from PyInstaller.utils.hooks import collect_submodules
+# QtWebEngineProcess.exe and its resources automatically. We also declare the
+# key QtWebEngine modules explicitly so a resource-less build can't drop them.
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 block_cipher = None
 
 hiddenimports = (
     collect_submodules("flask")
     + ["zee_core", "zee_voice", "zee_api", "events", "win_control",
-       "apppaths", "tokenstore", "updater", "tools.install_autostart"]
+       "apppaths", "tokenstore", "updater", "tools.install_autostart",
+       "gui.zee_gui"]
+    # QtWebEngine/WEB ENGINE
+    + [
+        "PySide6.QtWebEngineCore",
+        "PySide6.QtWebEngineWidgets",
+        "PySide6.QtWebEngine",
+        "PySide6.QtOpenGL",
+        "PySide6.QtQuick",
+        "PySide6.QtQml",
+    ]
+    + collect_submodules("PySide6.QtWebEngineCore")
+    + collect_submodules("PySide6.QtWebEngineWidgets")
 )
 
 datas = [
     ("templates", "templates"),
-]
+] + collect_data_files("PySide6.QtWebEngineCore")
 
 a = Analysis(
     ["zee.py"],

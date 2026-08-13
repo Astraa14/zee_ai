@@ -56,9 +56,20 @@ def _get_token():
 _token = _get_token()
 
 
+def _loopback():
+    """True when the request originates from this machine (dev mode)."""
+    addr = (request.remote_addr or "").strip()
+    return addr in ("127.0.0.1", "::1", "localhost") or addr.startswith("127.")
+
+
 def _authorized():
     if not _token:
-        return True
+        # No token configured: dev mode only (localhost), with a warning.
+        if _loopback():
+            log.warning("No auth token configured; allowing localhost request (dev mode). "
+                        "LAN access requires ZEE_TOKEN.")
+            return True
+        return False
     given = request.headers.get("X-ZEE-TOKEN", "")
     header = request.headers.get("Authorization", "")
     if header.startswith("Bearer "):
@@ -194,31 +205,18 @@ def home():
 
 @app.route("/health")
 def health():
-    """Readiness probe: reports Ollama + model availability.
+    """Readiness probe: Ollama reachability + automation opt-in.
 
-    Returns 200 when the brain can answer questions, 503 otherwise.
-    Audio is reported but does not gate readiness (TTS is best-effort).
+    Returns JSON ``{ok, ollama, automation_enabled}`` — ``200`` when the
+    Ollama brain answers, ``503`` otherwise.
     """
-    ollama_ok = zee_core.check_ollama()
-    model_ok = False
-    if ollama_ok:
-        try:
-            zee_core.ollama.show(zee_core.OLLAMA_MODEL)
-            model_ok = True
-        except Exception:
-            model_ok = False
-    ready = ollama_ok and model_ok
-    payload = {
-        "status": "ok" if ready else "degraded",
-        "ready": ready,
-        "ollama": ollama_ok,
-        "ollama_detail": zee_core.ollama_probe(),
+    probe = zee_core.ollama_probe() or "unavailable"
+    ok = probe == "ok"
+    return jsonify({
+        "ok": ok,
+        "ollama": probe,
         "automation_enabled": zee_core.automation_enabled(),
-        "model_available": model_ok,
-        "audio": zee_core.init_audio(),
-        "model": zee_core.OLLAMA_MODEL,
-    }
-    return jsonify(payload), (200 if ready else 503)
+    }), (200 if ok else 503)
 
 
 @app.route("/events")
@@ -352,6 +350,9 @@ def _describe_result(result):
 
 def run_server():
     """Serve the API (blocking). Initializes audio + warmup like the web app."""
+    # Logging is configured once here (RotatingFileHandler -> zee.log +
+    # console). Idempotent: safe when zee_core already configured it at import.
+    zee_core.setup_logging()
     report = zee_core.doctor()
     for line in zee_core.doctor_summary(report):
         log.info(f"[doctor] {line}")
@@ -368,7 +369,8 @@ def run_server():
         log.info(f"Web UI auth token: {_token}  (set ZEE_TOKEN to change, "
                  "ZEE_TOKEN=none to disable)")
     else:
-        log.warning("Authentication is DISABLED (ZEE_TOKEN=none).")
+        log.warning("No auth token configured: requests allowed from localhost only "
+                    "(dev mode). LAN access requires ZEE_TOKEN.")
 
     kwargs = {"host": "0.0.0.0", "port": 5000, "debug": debug}
     # HTTPS is on by default so the microphone works over the LAN.

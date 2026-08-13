@@ -117,12 +117,72 @@ def atomic_replace(new_file):
     return current
 
 
+# ---------------- daemon lifecycle (used by the updater) ----------------
+def base_url():
+    """Local daemon base URL (http/https per ZEE_HTTPS)."""
+    scheme = "https" if os.getenv("ZEE_HTTPS", "1") == "1" else "http"
+    return f"{scheme}://127.0.0.1:5000"
+
+
+def _auth_token():
+    token = os.getenv("ZEE_TOKEN")
+    if token is not None:
+        return token.strip() or None
+    try:
+        import tokenstore
+        return tokenstore.read_token()
+    except Exception:
+        return None
+
+
+def stop_daemon(timeout=10):
+    """Ask the running daemon to stop cleanly via the protected /shutdown."""
+    headers = {"Content-Type": "application/json"}
+    token = _auth_token()
+    if token:
+        headers["X-ZEE-TOKEN"] = token
+    try:
+        resp = requests.post(base_url() + "/shutdown", data=b"{}",
+                             headers=headers, timeout=timeout, verify=False)
+        resp.raise_for_status()
+        log.info("Daemon shutdown requested (HTTP %s)", resp.status_code)
+        return True
+    except Exception as e:
+        log.warning("Could not stop daemon: %s", e)
+        return False
+
+
+def start_daemon(exe=None):
+    """Restart the daemon detached (``<exe> daemon``). Returns the Popen or None."""
+    target = exe or sys.executable
+    args = [target, "daemon"]
+    try:
+        kwargs = {}
+        if os.name == "nt":
+            kwargs["creationflags"] = (subprocess.CREATE_NEW_PROCESS_GROUP
+                                       | subprocess.DETACHED_PROCESS)
+        else:
+            kwargs["start_new_session"] = True
+        proc = subprocess.Popen(
+            args, cwd=os.path.dirname(os.path.abspath(target)) or None,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, close_fds=True, **kwargs)
+        log.info("Restarted daemon: %s", " ".join(args))
+        return proc
+    except Exception as e:
+        log.error("Could not restart daemon: %s", e)
+        return None
+
+
 # ---------------- orchestration ----------------
-def run_update(url, sha256=None, apply=True):
+def run_update(url, sha256=None, apply=True, shutdown=False, restart=False):
     """Download + verify + apply an update. Returns a summary dict.
 
     ``url`` may be a manifest URL (auto-detected when it ends in .json) or
     a direct asset URL plus an explicit ``sha256``.
+
+    For bare-EXE updates, pass ``shutdown=True`` to stop the daemon first
+    (via POST /shutdown) and ``restart=True`` to relaunch it after the swap.
     """
     if url.endswith(".json") or "manifest" in url.lower():
         manifest = fetch_manifest(url)
@@ -144,15 +204,21 @@ def run_update(url, sha256=None, apply=True):
     verify_sha256(dest, expected)
 
     applied = False
+    replaced_file = None
     if apply:
         if dest.lower().endswith(".exe") and "setup" in os.path.basename(dest).lower():
             code, out, err = installer_apply(dest)
             applied = code in (0, 1)
             log.info("Installer finished (exit %s): %s", code, (err or out or "").strip())
         else:
-            atomic_replace(dest)
-            applied = True
-    return {"version": version, "file": dest, "applied": applied}
+            if shutdown:
+                stop_daemon()
+            replaced_file = atomic_replace(dest)
+            applied = bool(replaced_file)
+            if restart:
+                start_daemon(replaced_file)
+    return {"version": version, "file": dest, "applied": applied,
+            "replaced": replaced_file}
 
 
 # ---------------- CLI ----------------
@@ -173,10 +239,16 @@ def main(argv=None):
                         help="expected SHA-256 of the asset")
     parser.add_argument("--no-apply", action="store_true",
                         help="download + verify only")
+    parser.add_argument("--shutdown", action="store_true",
+                        help="POST /shutdown to stop the daemon before applying "
+                             "(needed to overwrite the running exe)")
+    parser.add_argument("--restart", action="store_true",
+                        help="start the daemon again after an atomic replace")
     args = parser.parse_args(argv)
 
     url = args.manifest or args.file
-    summary = run_update(url, sha256=args.sha256, apply=not args.no_apply)
+    summary = run_update(url, sha256=args.sha256, apply=not args.no_apply,
+                         shutdown=args.shutdown, restart=args.restart)
     print(json.dumps(summary))
     return 0
 

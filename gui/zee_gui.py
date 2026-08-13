@@ -17,7 +17,7 @@ import warnings
 
 import requests
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QEvent, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QIcon, QPixmap
 from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEngineUrlRequestInterceptor
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -245,6 +245,16 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
+    def show_and_raise(self):
+        """Raise + focus the window (wired to SSE wake events and the tray)."""
+        self._show_window()
+
+    def changeEvent(self, event):
+        # Minimizing hides to the tray instead of the taskbar.
+        if event.type() == QEvent.Type.WindowStateChange and self.isMinimized():
+            QTimer.singleShot(0, self.hide)
+        super().changeEvent(event)
+
     def closeEvent(self, event):
         # Closing keeps ZEE in the tray; the daemon keeps listening.
         self.hide()
@@ -275,7 +285,7 @@ class MainWindow(QMainWindow):
         except json.JSONDecodeError:
             return
         if payload.get("type") in ("wake", "approval"):
-            self._show_window()
+            self.show_and_raise()
 
 
 def main():

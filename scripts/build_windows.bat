@@ -1,6 +1,6 @@
 @echo off
-REM Build the ZEE onedir EXE with PyInstaller, then (if Inno Setup is
-REM installed) package it into an installer .exe.
+REM Build the ZEE onedir EXE with PyInstaller, run a quick smoke test, then
+REM (if Inno Setup is installed) package it into an installer .exe.
 REM
 REM Prereqs on the build machine:
 REM   pip install -r requirements.txt -r requirements-gui.txt -r requirements-dev.txt
@@ -11,6 +11,9 @@ REM   set ZEE_SIGNING=1
 REM   set WINDOWS_CERT_BASE64_FILE=path\to\cert.pfx.b64
 REM   set CERT_PASSWORD=the-pfx-password
 REM   (signtool must be on PATH or set SIGNTOOL=full\path\signtool.exe)
+REM
+REM Optional extra single-file EXE (in addition to the onedir bundle):
+REM   set ZEE_ONEFILE=1
 setlocal
 cd /d "%~dp0\.."
 set BUILD_ROOT=%cd%
@@ -23,12 +26,36 @@ if errorlevel 1 (
 )
 echo [OK] Bundle: %BUILD_ROOT%\dist\Zee\
 
+REM --- 2. Optional single-file EXE -------------------------------------
+if "%ZEE_ONEFILE%"=="1" (
+    python -m PyInstaller --noconfirm --clean --onefile --name Zee ^
+        --hidden-import=PySide6.QtWebEngineCore ^
+        --hidden-import=PySide6.QtWebEngineWidgets ^
+        --add-data "%BUILD_ROOT%\templates;templates" ^
+        --collect-submodules flask zee.py
+    if errorlevel 1 (
+        echo [ERROR] PyInstaller onefile build failed.
+        exit /b 1
+    )
+    echo [OK] Single-file EXE: %BUILD_ROOT%\dist\Zee.exe
+    if "%ZEE_SIGNING%"=="1" call :sign "%BUILD_ROOT%\dist\Zee.exe"
+)
+
 mkdir "%BUILD_ROOT%\artifacts" 2>nul
 
-REM --- 2. Code-sign the exe (optional) ---------------------------------
+REM --- 3. Smoke test the bundle -----------------------------------------
+echo Running bundle smoke test (zee doctor)...
+"%BUILD_ROOT%\dist\Zee\Zee.exe" doctor
+if errorlevel 1 (
+    echo [ERROR] Bundle smoke test failed (Zee.exe doctor exited nonzero).
+    exit /b 1
+)
+echo [OK] Bundle smoke test passed.
+
+REM --- 4. Code-sign the exe (optional) ---------------------------------
 if "%ZEE_SIGNING%"=="1" call :sign "%BUILD_ROOT%\dist\Zee\Zee.exe"
 
-REM --- 3. Inno Setup installer (optional) ------------------------------
+REM --- 5. Inno Setup installer (optional) ------------------------------
 set "ISCC="
 if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
 if not defined ISCC if exist "%ProgramFiles%\Inno Setup 6\ISCC.exe" set "ISCC=%ProgramFiles%\Inno Setup 6\ISCC.exe"

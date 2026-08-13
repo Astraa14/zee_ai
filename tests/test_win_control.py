@@ -95,6 +95,7 @@ def test_open_app_fuzzy_shortcut_match(monkeypatch):
     """
     monkeypatch.setattr("os.name", "nt")
     _fixed_index(monkeypatch)
+    monkeypatch.setenv("ZEE_ALLOW_AUTOMATION", "1")
     opened = []
     monkeypatch.setattr(os, "startfile", lambda target: opened.append(target), raising=False)
     result = wc.tool_open_app("steam")
@@ -104,6 +105,7 @@ def test_open_app_fuzzy_shortcut_match(monkeypatch):
 
 def test_open_app_known_goes_to_launcher(monkeypatch):
     monkeypatch.setattr("os.name", "nt")
+    monkeypatch.setenv("ZEE_ALLOW_AUTOMATION", "1")
     started = []
     monkeypatch.setattr(wc, "_start", lambda target: started.append(target))
     result = wc.tool_open_app("notepad")
@@ -111,6 +113,30 @@ def test_open_app_known_goes_to_launcher(monkeypatch):
     assert started == ["notepad"]
     result = wc.tool_open_app("YouTube")
     assert result.get("opened_website") == "https://www.youtube.com"
+
+
+def test_desktop_tools_require_automation(monkeypatch):
+    """Desktop control (apps, folders, typing, screenshots, processes, system
+    actions) is opt-in via ZEE_ALLOW_AUTOMATION=1."""
+    monkeypatch.setattr("os.name", "nt")
+    monkeypatch.delenv("ZEE_ALLOW_AUTOMATION", raising=False)
+    _fixed_index(monkeypatch)
+    monkeypatch.setattr(os, "startfile", lambda target: None, raising=False)
+    monkeypatch.setattr(wc, "_start", lambda target: None)
+
+    def denied(result):
+        assert "Automation disabled" in result["error"]
+
+    denied(wc.tool_open_app("steam"))
+    denied(wc.tool_open_app("notepad"))
+    denied(wc.tool_open_folder("C:\\Users\\Public"))
+    denied(wc.tool_type_text("hello"))
+    denied(wc.tool_screenshot())
+    denied(wc.tool_kill_process("calc"))
+    denied(wc.tool_system_action("lock"))
+    # websites are not desktop automation and stay allowed
+    result = wc.tool_open_app("example.com")
+    assert result.get("opened_website") == "https://example.com"
 
 
 def test_messenger_and_discord_require_automation(monkeypatch):

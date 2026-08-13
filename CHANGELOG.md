@@ -9,6 +9,19 @@ All notable changes to ZEE. Format loosely based on
 - Self-update: `POST /update` (token-protected) and `updater.py`
   (manifest fetch, SHA-256 verification, silent-installer apply / atomic
   exe swap). Upgrades no longer require uninstalling.
+- `zee doctor` CLI command; `build_windows.bat` now smoke-tests the bundle
+  with `Zee.exe doctor` before packaging and supports an optional onefile
+  build (`ZEE_ONEFILE=1`).
+- `updater.py --shutdown/--restart`: stops the running daemon via the
+  protected `POST /shutdown` before an atomic exe swap and relaunches it
+  afterward, so bare-EXE updates apply immediately.
+- `zee.spec` declares PySide6 QtWebEngine hidden imports + data files
+  explicitly (belt-and-braces alongside PyInstaller's own hooks).
+- `zee install-model` (`tools/download_vosk_model.py`): optional post-install
+  Vosk model installer — downloads + safely unpacks a model into the data dir,
+  so large speech models stay out of the EXE. CI `packaging` job builds a
+  headless onedir bundle to smoke-test the spec; `requirements-dev.txt` now
+  includes PySide6 for GUI tests.
 
 ## [1.0.0] - 2026-08-03
 

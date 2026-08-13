@@ -2,6 +2,7 @@
 and the token-protected /update endpoint."""
 import hashlib
 import json
+import sys
 import threading
 
 import pytest
@@ -144,6 +145,65 @@ def test_run_update_flow(monkeypatch, tmp_path, payload_file):
     summary = updater.run_update("https://x/latest.json", apply=True)
     assert summary["version"] == "9.9.9"
     assert summary["applied"] is True
+
+
+def test_run_update_atomic_calls_shutdown_and_restart(monkeypatch, tmp_path, payload_file):
+    """Bare-EXE update: --shutdown stops the daemon, --restart relaunches it."""
+    f, expected = payload_file
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "Zee.exe"))
+    (tmp_path / "Zee.exe").write_bytes(b"old")
+
+    def fake_download(url, dest, timeout=120):
+        with open(dest, "wb") as out:
+            out.write(f.read_bytes())
+        return dest
+
+    monkeypatch.setattr(updater, "fetch_manifest", lambda url: {
+        "version": "9.9.9", "url": "https://x/Zee.exe", "sha256": expected})
+    monkeypatch.setattr(updater, "download", fake_download)
+    monkeypatch.setattr(updater.tempfile, "gettempdir", lambda: str(tmp_path))
+    stopped, restarted = [], []
+    monkeypatch.setattr(updater, "stop_daemon",
+                        lambda *a, **k: (stopped.append(True), True)[1])
+    monkeypatch.setattr(updater, "start_daemon",
+                        lambda exe=None: (restarted.append(exe), None)[1])
+
+    summary = updater.run_update("https://x/latest.json", apply=True,
+                                 shutdown=True, restart=True)
+    assert summary["applied"] is True
+    assert summary["replaced"] == str(tmp_path / "Zee.exe")
+    assert stopped == [True]
+    assert restarted == [str(tmp_path / "Zee.exe")]
+    assert (tmp_path / "Zee.exe").read_bytes() == b"ZEE-RELEASE-BINARY" * 64
+
+
+def test_stop_daemon_sends_shutdown_with_token(monkeypatch):
+    calls = {}
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+    def fake_post(url, data=None, headers=None, timeout=10, verify=False):
+        calls["url"] = url
+        calls["headers"] = headers
+        return _Resp()
+
+    monkeypatch.setenv("ZEE_TOKEN", "tok123")
+    monkeypatch.setattr(updater.requests, "post", fake_post)
+    assert updater.stop_daemon() is True
+    assert calls["url"].endswith("/shutdown")
+    assert calls["headers"]["X-ZEE-TOKEN"] == "tok123"
+
+
+def test_stop_daemon_returns_false_on_failure(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(updater.requests, "post", boom)
+    assert updater.stop_daemon() is False
 
 
 # ---------------- /update endpoint ----------------
