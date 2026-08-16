@@ -1,4 +1,5 @@
 """SSE broadcaster (events.py): subscribers receive JSON payloads as data: frames."""
+
 import json
 import threading
 import time
@@ -32,7 +33,7 @@ def _broadcast_and_wait(payload, predicate, timeout=5):
 
     t = threading.Thread(target=consume, daemon=True)
     t.start()
-    time.sleep(0.25)          # let the subscriber register
+    time.sleep(0.25)  # let the subscriber register
     events.broadcast(payload)
     assert done.wait(timeout), "subscriber never received the event"
     t.join(timeout=2)
@@ -45,7 +46,7 @@ def test_broadcast_delivers_wake_event():
         lambda f: '"type": "wake"' in f,
     )
     data = [f for f in frames if f.startswith("data: ")][-1]
-    payload = json.loads(data[len("data: "):])
+    payload = json.loads(data[len("data: ") :])
     assert payload["type"] == "wake"
     assert payload["phrase"] == "zee"
 
@@ -56,7 +57,7 @@ def test_broadcast_delivers_approval_event():
         lambda f: '"type": "approval"' in f,
     )
     data = [f for f in frames if f.startswith("data: ")][-1]
-    payload = json.loads(data[len("data: "):])
+    payload = json.loads(data[len("data: ") :])
     assert payload["action"] == "kill_process"
     assert payload["id"] == "abc123"
 

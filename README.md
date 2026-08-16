@@ -173,13 +173,26 @@ and control characters are rejected) and every action is written to the
 approval log. Without the flag all of these return an error telling you to set
 `ZEE_ALLOW_AUTOMATION=1`.
 
+### Updates
+
+Self-update runs over the token-protected `POST /update` (manifest or direct
+URL + `sha256`). The GUI exposes it via tray icon → **Check for Updates...**
+(prefill the manifest URL with `ZEE_UPDATE_MANIFEST`). Every artifact is
+SHA-256 verified before apply; with `ZEE_REQUIRE_SIGNATURE=1` (optionally
+pinned to `ZEE_SIGNER_THUMBPRINT`) the Windows Authenticode signature must
+also be valid. Installers upgrade in place (stable AppId — no uninstall
+step); bare exes are swapped atomically. The daemon shuts down cleanly via
+`POST /shutdown` (`--shutdown --restart` flags on `python -m updater`).
+
 ### Diagnostics
 
 `python zee_core.py --doctor` prints a health report (dependencies,
-Ollama + model availability, audio, Vosk model, automation flag) and exits
-nonzero when critical pieces are missing. `zee_api.py` and `zee_voice.py` log the
-same report at startup. Server logs rotate in `zee.log`
-(`ZEE_LOG_FILE`).
+Ollama + model availability, audio, Vosk model, token, HTTPS cert,
+automation flag) and exits nonzero when critical pieces are missing.
+`zee_api.py` and `zee_voice.py` log the same report at startup. Server logs
+rotate in `zee.log` (`ZEE_LOG_FILE`). Bundled builds can run
+`Zee.exe doctor --smoke` — a bundle-integrity check that ignores runtime
+environment (no Ollama required), used by the CI/build pipeline.
 
 ### Health endpoint
 
@@ -306,6 +319,10 @@ Set any of these environment variables before running:
 | `ZEE_ALLOW_AUTOMATION` | `0`                  | Set `1` to enable Discord/Messenger automation |
 | `ZEE_LOG_LEVEL`    | `INFO`                   | Log verbosity (`DEBUG`, `INFO`, `WARNING`…) |
 | `ZEE_LOG_FILE`     | *(console only)*         | Optional log file path                      |
+| `ZEE_OLLAMA_TIMEOUT` | `3` (probes) / `60` (chat) | Ollama request timeouts so `/health` and `doctor` never hang |
+| `ZEE_UPDATE_MANIFEST` | *(empty)*              | Default release-manifest URL for the GUI's "Check for Updates" dialog |
+| `ZEE_REQUIRE_SIGNATURE` | `0`                 | Set `1` to force Authenticode verification before applying updates |
+| `ZEE_SIGNER_THUMBPRINT` | *(empty)*            | Require the update signer's certificate thumbprint to match |
 
 ## Logging
 

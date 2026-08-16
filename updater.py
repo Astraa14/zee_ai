@@ -20,7 +20,9 @@ CLI::
     python -m updater --manifest https://example.com/zee/latest.json --apply
     python -m updater --file https://example.com/Zee.exe --sha256 <hex> --apply
 """
+
 import argparse
+import base64
 import hashlib
 import json
 import logging
@@ -35,6 +37,13 @@ log = logging.getLogger("zee.update")
 
 _CHUNK = 1024 * 256
 _INSTALLER_FLAGS = ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
+_SIGN_VERIFY_SCRIPT = r"""
+$sig = Get-AuthenticodeSignature -FilePath $env:ZEE_UPDATE_FILE
+[PSCustomObject]@{
+  Status = $sig.Status.ToString()
+  Thumbprint = $sig.SignerCertificate.Thumbprint
+} | ConvertTo-Json
+""".strip()
 
 
 # ---------------- primitives ----------------
@@ -51,9 +60,65 @@ def verify_sha256(path, expected):
     """Raise ValueError when the file digest does not match ``expected``."""
     actual = sha256_file(path)
     if actual.lower() != expected.strip().lower():
-        raise ValueError(
-            f"SHA-256 mismatch: expected {expected}, got {actual}")
+        raise ValueError(f"SHA-256 mismatch: expected {expected}, got {actual}")
     return True
+
+
+def verify_authenticode(path, expected_thumbprint=None):
+    """Verify a Windows Authenticode signature on ``path``.
+
+    Uses Get-AuthenticodeSignature via PowerShell (``-EncodedCommand``, the
+    path travels in an env var so nothing is interpolated into a command
+    string). Returns the signer thumbprint (None on non-Windows).
+
+    Raises ValueError when the file is unsigned/broken-signature, or when
+    ``expected_thumbprint`` is given and the signer does not match it.
+    """
+    if os.name != "nt":
+        return None
+    encoded = base64.b64encode(_SIGN_VERIFY_SCRIPT.encode("utf-16-le")).decode("ascii")
+    env = dict(os.environ)
+    env["ZEE_UPDATE_FILE"] = path
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise ValueError(f"Authenticode check failed: {e}")
+    try:
+        result = json.loads(proc.stdout)
+    except ValueError:
+        raise ValueError(f"Authenticode check returned garbage: {proc.stdout!r}")
+    status = str(result.get("Status", "")).lower()
+    thumbprint = result.get("Thumbprint") or None
+    if status != "valid":
+        raise ValueError(f"Authenticode signature not valid: {status}")
+    if expected_thumbprint and (
+        not thumbprint or thumbprint.lower() != expected_thumbprint.lower()
+    ):
+        raise ValueError(
+            f"Signer thumbprint mismatch: expected " f"{expected_thumbprint}, got {thumbprint}"
+        )
+    return thumbprint
+
+
+def require_verified(dest):
+    """Enforce signature policy on a downloaded artifact before applying it.
+
+    SHA-256 is always verified by the caller; this adds Authenticode when
+    the deployment requires it (ZEE_REQUIRE_SIGNATURE=1 or an expected
+    signer thumbprint is configured).
+    """
+    require_sig = os.getenv("ZEE_REQUIRE_SIGNATURE", "0") == "1"
+    expected_tp = os.getenv("ZEE_SIGNER_THUMBPRINT", "").strip() or None
+    if not require_sig and not expected_tp:
+        return
+    tp = verify_authenticode(dest, expected_tp)
+    log.info("Authenticode verified (signer %s)", tp)
 
 
 def download(url, dest, timeout=120):
@@ -85,8 +150,7 @@ def installer_apply(installer_path, timeout=600):
     cmd = [installer_path] + _INSTALLER_FLAGS
     log.info("Running installer: %s", " ".join(cmd))
     try:
-        proc = subprocess.run(cmd, timeout=timeout,
-                              capture_output=True, text=True)
+        proc = subprocess.run(cmd, timeout=timeout, capture_output=True, text=True)
     except subprocess.TimeoutExpired:
         return None, "", f"installer timed out after {timeout}s"
     return proc.returncode, proc.stdout, proc.stderr
@@ -130,6 +194,7 @@ def _auth_token():
         return token.strip() or None
     try:
         import tokenstore
+
         return tokenstore.read_token()
     except Exception:
         return None
@@ -142,8 +207,9 @@ def stop_daemon(timeout=10):
     if token:
         headers["X-ZEE-TOKEN"] = token
     try:
-        resp = requests.post(base_url() + "/shutdown", data=b"{}",
-                             headers=headers, timeout=timeout, verify=False)
+        resp = requests.post(
+            base_url() + "/shutdown", data=b"{}", headers=headers, timeout=timeout, verify=False
+        )
         resp.raise_for_status()
         log.info("Daemon shutdown requested (HTTP %s)", resp.status_code)
         return True
@@ -159,14 +225,20 @@ def start_daemon(exe=None):
     try:
         kwargs = {}
         if os.name == "nt":
-            kwargs["creationflags"] = (subprocess.CREATE_NEW_PROCESS_GROUP
-                                       | subprocess.DETACHED_PROCESS)
+            kwargs["creationflags"] = (
+                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+            )
         else:
             kwargs["start_new_session"] = True
         proc = subprocess.Popen(
-            args, cwd=os.path.dirname(os.path.abspath(target)) or None,
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, close_fds=True, **kwargs)
+            args,
+            cwd=os.path.dirname(os.path.abspath(target)) or None,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            **kwargs,
+        )
         log.info("Restarted daemon: %s", " ".join(args))
         return proc
     except Exception as e:
@@ -202,6 +274,7 @@ def run_update(url, sha256=None, apply=True, shutdown=False, restart=False):
     download(asset_url, dest)
     log.info("Verifying SHA-256...")
     verify_sha256(dest, expected)
+    require_verified(dest)
 
     applied = False
     replaced_file = None
@@ -217,8 +290,7 @@ def run_update(url, sha256=None, apply=True, shutdown=False, restart=False):
             applied = bool(replaced_file)
             if restart:
                 start_daemon(replaced_file)
-    return {"version": version, "file": dest, "applied": applied,
-            "replaced": replaced_file}
+    return {"version": version, "file": dest, "applied": applied, "replaced": replaced_file}
 
 
 # ---------------- CLI ----------------
@@ -229,26 +301,32 @@ def main(argv=None):
         datefmt="%H:%M:%S",
     )
     parser = argparse.ArgumentParser(
-        prog="zee-updater", description="Download, verify and apply a ZEE update")
+        prog="zee-updater", description="Download, verify and apply a ZEE update"
+    )
     src = parser.add_mutually_exclusive_group(required=True)
-    src.add_argument("--manifest", metavar="URL",
-                     help="release manifest JSON (version/url/sha256)")
-    src.add_argument("--file", metavar="URL",
-                     help="direct asset URL (needs --sha256)")
-    parser.add_argument("--sha256", metavar="HEX",
-                        help="expected SHA-256 of the asset")
-    parser.add_argument("--no-apply", action="store_true",
-                        help="download + verify only")
-    parser.add_argument("--shutdown", action="store_true",
-                        help="POST /shutdown to stop the daemon before applying "
-                             "(needed to overwrite the running exe)")
-    parser.add_argument("--restart", action="store_true",
-                        help="start the daemon again after an atomic replace")
+    src.add_argument("--manifest", metavar="URL", help="release manifest JSON (version/url/sha256)")
+    src.add_argument("--file", metavar="URL", help="direct asset URL (needs --sha256)")
+    parser.add_argument("--sha256", metavar="HEX", help="expected SHA-256 of the asset")
+    parser.add_argument("--no-apply", action="store_true", help="download + verify only")
+    parser.add_argument(
+        "--shutdown",
+        action="store_true",
+        help="POST /shutdown to stop the daemon before applying "
+        "(needed to overwrite the running exe)",
+    )
+    parser.add_argument(
+        "--restart", action="store_true", help="start the daemon again after an atomic replace"
+    )
     args = parser.parse_args(argv)
 
     url = args.manifest or args.file
-    summary = run_update(url, sha256=args.sha256, apply=not args.no_apply,
-                         shutdown=args.shutdown, restart=args.restart)
+    summary = run_update(
+        url,
+        sha256=args.sha256,
+        apply=not args.no_apply,
+        shutdown=args.shutdown,
+        restart=args.restart,
+    )
     print(json.dumps(summary))
     return 0
 

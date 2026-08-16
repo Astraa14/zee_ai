@@ -10,7 +10,9 @@ interactive desktop session.
 
 Run with ``python -m tools.install_autostart [--gui]`` or ``zee install-autostart [--gui]``.
 """
+
 import argparse
+import base64
 import os
 import subprocess
 import sys
@@ -18,6 +20,37 @@ import sys
 import apppaths
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+_PS_SHORTCUT = r"""
+$ws = New-Object -ComObject WScript.Shell
+$sc = $ws.CreateShortcut($env:ZEE_SHORTCUT)
+$sc.TargetPath = $env:ZEE_TARGET
+$sc.Arguments = $env:ZEE_ARGS
+$sc.WorkingDirectory = $env:ZEE_WORKING_DIR
+$sc.WindowStyle = 7
+$sc.Save()
+""".strip()
+
+
+def _powershell_encoded(script, env=None):
+    """Run a PowerShell script via -EncodedCommand with values in env vars.
+
+    The script text is fixed; all values travel as environment variables or
+    inside the base64 payload — nothing is interpolated into a command
+    string, so quotes, apostrophes or ';' in paths can never break or
+    extend the script.
+    """
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    run_env = dict(os.environ)
+    if env:
+        run_env.update(env)
+    return subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=run_env,
+    )
 
 
 def _launch_command(mode):
@@ -37,23 +70,22 @@ def _pythonw():
 
 
 def _install_windows(with_gui):
-    startup = os.path.join(os.environ.get("APPDATA", ""),
-                           "Microsoft", "Windows", "Start Menu",
-                           "Programs", "Startup")
+    startup = os.path.join(
+        os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs", "Startup"
+    )
     if not os.path.isdir(startup):
         raise RuntimeError(f"Startup folder not found: {startup}")
     target, args = _launch_command("start" if with_gui else "daemon")
     shortcut = os.path.join(startup, "ZEE.lnk")
-    ps = (
-        "$ws = New-Object -ComObject WScript.Shell; "
-        f"$sc = $ws.CreateShortcut('{shortcut}'); "
-        f"$sc.TargetPath = '{target}'; "
-        f"$sc.Arguments = '{args}'; "
-        f"$sc.WorkingDirectory = '{ROOT}'; "
-        "$sc.WindowStyle = 7; "
-        "$sc.Save()"
+    _powershell_encoded(
+        _PS_SHORTCUT,
+        {
+            "ZEE_SHORTCUT": shortcut,
+            "ZEE_TARGET": target,
+            "ZEE_ARGS": args,
+            "ZEE_WORKING_DIR": ROOT,
+        },
     )
-    subprocess.run(["powershell", "-NoProfile", "-Command", ps], check=True)
     return f"Installed autostart shortcut: {shortcut}"
 
 
@@ -117,8 +149,11 @@ def install_autostart(with_gui=False):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Register ZEE at login for the current user")
-    parser.add_argument("--gui", action="store_true",
-                        help="also autostart the desktop GUI window (daemon stays background)")
+    parser.add_argument(
+        "--gui",
+        action="store_true",
+        help="also autostart the desktop GUI window (daemon stays background)",
+    )
     args = parser.parse_args(argv)
     path = install_autostart(with_gui=args.gui)
     print(f"ZEE autostart registered: {path}")

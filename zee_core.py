@@ -54,7 +54,10 @@ def setup_logging():
     logfile = os.getenv("ZEE_LOG_FILE") or apppaths.data_path("zee.log")
     try:
         rotating = logging.handlers.RotatingFileHandler(
-            logfile, maxBytes=1_000_000, backupCount=3, encoding="utf-8",
+            logfile,
+            maxBytes=1_000_000,
+            backupCount=3,
+            encoding="utf-8",
         )
         rotating.setFormatter(fmt)
         log.addHandler(rotating)
@@ -146,7 +149,11 @@ def open_url_in_browser(url):
     except Exception as e:
         log.warning(f"webbrowser.open({url!r}) raised {e}; falling back")
     if os.name == "nt":
-        opener = ["cmd", "/c", "start", "", url]
+        try:
+            os.startfile(url)
+            return None
+        except OSError as e:
+            return f"Could not open {url!r}: {e}"
     elif sys.platform == "darwin":
         opener = ["open", url]
     else:
@@ -250,11 +257,13 @@ def _system_prompt():
 def _remember(user_text, reply):
     """Keep the last few turns so ZEE can follow conversations."""
     with _memory_lock:
-        _history.extend([
-            {"role": "user", "content": user_text},
-            {"role": "assistant", "content": reply},
-        ])
-        del _history[: -_MAX_HISTORY]
+        _history.extend(
+            [
+                {"role": "user", "content": user_text},
+                {"role": "assistant", "content": reply},
+            ]
+        )
+        del _history[:-_MAX_HISTORY]
 
 
 _load_memory()
@@ -322,9 +331,7 @@ def speak(text, wait=False):
         fd, path = tempfile.mkstemp(suffix=".mp3", prefix="zee_")
         os.close(fd)
         ready = threading.Event()
-        writer = threading.Thread(
-            target=lambda: asyncio.run(generate(path, ready)), daemon=True
-        )
+        writer = threading.Thread(target=lambda: asyncio.run(generate(path, ready)), daemon=True)
         writer.start()
         try:
             ready.wait(timeout=15)
@@ -376,8 +383,15 @@ def _filter_args(func, args):
         if isinstance(v, dict) and ({"type", "value", "description"} & set(v.keys())):
             # Models sometimes wrap the value in {"type": ..., "value": ...}.
             for key in ("value", "description", "type"):
-                if key in v and v[key] not in ("string", "number", "integer",
-                                               "boolean", "object", "array", "null"):
+                if key in v and v[key] not in (
+                    "string",
+                    "number",
+                    "integer",
+                    "boolean",
+                    "object",
+                    "array",
+                    "null",
+                ):
                     v = v[key]
                     break
             else:
@@ -409,6 +423,7 @@ def _fetch_json(url, timeout=10):
 
 def tool_get_time():
     from datetime import datetime
+
     return {"datetime": datetime.now().strftime("%A, %Y-%m-%d %H:%M:%S")}
 
 
@@ -452,6 +467,7 @@ def tool_read_notes():
 def tool_list_processes():
     """List the apps currently running, most CPU-hungry first."""
     import psutil
+
     procs = []
     for p in psutil.process_iter(["name", "cpu_percent"]):
         try:
@@ -493,20 +509,23 @@ def tool_set_reminder(duration: str, message: str = None):
     if minutes is None or minutes <= 0:
         return {"error": f"Could not understand the duration: {duration!r}"}
     msg = clean_text(message or "Your reminder is due.", 500)
+
     def fire():
         time.sleep(minutes * 60)
         speak(f"Reminder: {msg}")
+
     threading.Thread(target=fire, daemon=True).start()
     return {"reminder_set_for_minutes": minutes, "message": msg}
 
 
 def tool_system_info():
     import psutil
+
     info = {
         "cpu_percent": psutil.cpu_percent(interval=1),
         "ram_percent": psutil.virtual_memory().percent,
-        "ram_used_gb": round(psutil.virtual_memory().used / 1024 ** 3, 1),
-        "ram_total_gb": round(psutil.virtual_memory().total / 1024 ** 3, 1),
+        "ram_used_gb": round(psutil.virtual_memory().used / 1024**3, 1),
+        "ram_total_gb": round(psutil.virtual_memory().total / 1024**3, 1),
     }
     battery = psutil.sensors_battery()
     if battery:
@@ -519,13 +538,15 @@ def tool_web_search(query: str):
     query = clean_text(query, 300)
     if not query:
         return {"error": "No search query given."}
-    params = urllib.parse.urlencode({
-        "action": "query",
-        "list": "search",
-        "srsearch": query,
-        "format": "json",
-        "srlimit": 5,
-    })
+    params = urllib.parse.urlencode(
+        {
+            "action": "query",
+            "list": "search",
+            "srsearch": query,
+            "format": "json",
+            "srlimit": 5,
+        }
+    )
     try:
         data = _fetch_json(f"https://en.wikipedia.org/w/api.php?{params}")
     except Exception as e:
@@ -533,25 +554,45 @@ def tool_web_search(query: str):
     results = []
     for hit in data.get("query", {}).get("search", []):
         snippet = re.sub(r"<[^>]+>", "", hit.get("snippet", ""))
-        results.append({
-            "title": hit.get("title"),
-            "snippet": snippet,
-            "url": f"https://en.wikipedia.org/?curid={hit.get('pageid')}",
-        })
+        results.append(
+            {
+                "title": hit.get("title"),
+                "snippet": snippet,
+                "url": f"https://en.wikipedia.org/?curid={hit.get('pageid')}",
+            }
+        )
     return {"query": query, "results": results}
 
 
 _WMO_CODES = {
-    0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
-    45: "Fog", 48: "Depositing rime fog",
-    51: "Light drizzle", 53: "Moderate drizzle", 55: "Dense drizzle",
-    56: "Light freezing drizzle", 57: "Dense freezing drizzle",
-    61: "Light rain", 63: "Moderate rain", 65: "Heavy rain",
-    66: "Light freezing rain", 67: "Heavy freezing rain",
-    71: "Light snow", 73: "Moderate snow", 75: "Heavy snow", 77: "Snow grains",
-    80: "Light rain showers", 81: "Moderate rain showers", 82: "Violent rain showers",
-    85: "Light snow showers", 86: "Heavy snow showers",
-    95: "Thunderstorm", 96: "Thunderstorm with light hail", 99: "Thunderstorm with heavy hail",
+    0: "Clear sky",
+    1: "Mainly clear",
+    2: "Partly cloudy",
+    3: "Overcast",
+    45: "Fog",
+    48: "Depositing rime fog",
+    51: "Light drizzle",
+    53: "Moderate drizzle",
+    55: "Dense drizzle",
+    56: "Light freezing drizzle",
+    57: "Dense freezing drizzle",
+    61: "Light rain",
+    63: "Moderate rain",
+    65: "Heavy rain",
+    66: "Light freezing rain",
+    67: "Heavy freezing rain",
+    71: "Light snow",
+    73: "Moderate snow",
+    75: "Heavy snow",
+    77: "Snow grains",
+    80: "Light rain showers",
+    81: "Moderate rain showers",
+    82: "Violent rain showers",
+    85: "Light snow showers",
+    86: "Heavy snow showers",
+    95: "Thunderstorm",
+    96: "Thunderstorm with light hail",
+    99: "Thunderstorm with heavy hail",
 }
 
 
@@ -593,6 +634,7 @@ def tool_create_note(content: str):
         return {"error": "No note content given."}
     notes_file = os.path.join(_BASE_DIR, "zee_notes.txt")
     from datetime import datetime
+
     with open(notes_file, "a", encoding="utf-8") as f:
         f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M')}] {content}\n")
     return {"saved_to": notes_file}
@@ -619,11 +661,11 @@ _approval_lock = threading.Lock()
 
 def _iso(ts):
     from datetime import datetime
+
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%dT%H:%M:%S")
 
 
-def _append_approval(status, approval_id, name, args, expires=None, actor="unknown",
-                     result=None):
+def _append_approval(status, approval_id, name, args, expires=None, actor="unknown", result=None):
     """Append one JSON line to approvals.log (audit trail)."""
     entry = {
         "timestamp": _iso(time.time()),
@@ -683,8 +725,9 @@ def request_approval(name, args, actor="unknown"):
         for old_id, old in list(_pending_approvals.items()):
             if old.get("expires", 0) < now:
                 _pending_approvals.pop(old_id, None)
-                _append_approval("expired", old_id, old.get("name"),
-                                 old.get("args"), old.get("expires"), actor)
+                _append_approval(
+                    "expired", old_id, old.get("name"), old.get("args"), old.get("expires"), actor
+                )
         _pending_approvals[aid] = {
             "name": name,
             "args": args,
@@ -693,14 +736,16 @@ def request_approval(name, args, actor="unknown"):
     _save_pending_approvals()
     _append_approval("requested", aid, name, args, now + _APPROVAL_TTL, actor)
     log.warning(f"Approval requested: {name}({json.dumps(args)}) [id={aid}, actor={actor}]")
-    _broadcast_approval({
-        "type": "approval",
-        "id": aid,
-        "action": name,
-        "args": args,
-        "expires": round(now + _APPROVAL_TTL, 3),
-        "actor": actor,
-    })
+    _broadcast_approval(
+        {
+            "type": "approval",
+            "id": aid,
+            "action": name,
+            "args": args,
+            "expires": round(now + _APPROVAL_TTL, 3),
+            "actor": actor,
+        }
+    )
     return {
         "needs_approval": True,
         "id": aid,
@@ -714,8 +759,9 @@ def maybe_request_approval(user_text, actor="unknown"):
     """Safety net: if the user asked for a dangerous action but the model didn't
     call a tool, register the approval anyway so the flow always works."""
     t = (user_text or "").lower()
-    if re.search(r"\b(shut\s?down|power\s?off|turn\s?off)\b.*\b(computer|pc|machine|laptop|system)\b", t) or \
-       re.fullmatch(r"\s*(shut\s?down|power\s?off)\s*[.!]*\s*", t):
+    if re.search(
+        r"\b(shut\s?down|power\s?off|turn\s?off)\b.*\b(computer|pc|machine|laptop|system)\b", t
+    ) or re.fullmatch(r"\s*(shut\s?down|power\s?off)\s*[.!]*\s*", t):
         return request_approval("system_action", {"action": "shutdown"}, actor=actor)
     if re.search(r"\b(restart|reboot)\b", t):
         return request_approval("system_action", {"action": "restart"}, actor=actor)
@@ -728,7 +774,12 @@ def maybe_request_approval(user_text, actor="unknown"):
     m = re.search(r"\b(kill|close|terminate|stop)\s+(?:the\s+)?([a-z][a-z0-9 ._-]{1,24})", t)
     if m:
         name = m.group(2).split()[0].removesuffix(".exe")
-        if name in KNOWN_APP_NAMES or name.endswith("app") or name.endswith("application") or name.endswith("browser"):
+        if (
+            name in KNOWN_APP_NAMES
+            or name.endswith("app")
+            or name.endswith("application")
+            or name.endswith("browser")
+        ):
             return request_approval("kill_process", {"name": name}, actor=actor)
     return None
 
@@ -745,25 +796,67 @@ def approve_action(action_id, actor="unknown"):
     if item.get("expires", 0) < time.time():
         _save_pending_approvals()
         result = {"error": "Approval expired."}
-        _append_approval("expired", action_id, item.get("name"),
-                         item.get("args"), item.get("expires"), actor, result)
+        _append_approval(
+            "expired",
+            action_id,
+            item.get("name"),
+            item.get("args"),
+            item.get("expires"),
+            actor,
+            result,
+        )
         return result
     _save_pending_approvals()
     func = _TOOL_FUNCS.get(item["name"])
     if not func:
         result = {"error": f"Unknown tool: {item['name']}"}
-        _append_approval("approved_failed", action_id, item.get("name"),
-                         item.get("args"), item.get("expires"), actor, result)
+        _append_approval(
+            "approved_failed",
+            action_id,
+            item.get("name"),
+            item.get("args"),
+            item.get("expires"),
+            actor,
+            result,
+        )
         return result
     try:
         result = func(**_filter_args(func, item["args"])) if item["args"] else func()
     except Exception as e:
         result = {"error": f"{item['name']} failed: {e}"}
-    _append_approval("approved", action_id, item["name"], item["args"],
-                     item.get("expires"), actor, result)
+        _save_pending_approvals()
+        _append_approval(
+            "approved_failed",
+            action_id,
+            item["name"],
+            item["args"],
+            item.get("expires"),
+            actor,
+            result,
+        )
+        _broadcast_approval(
+            {
+                "type": "approval_result",
+                "id": action_id,
+                "status": "denied",
+                "action": item["name"],
+                "result": result,
+            }
+        )
+        return result
+    _append_approval(
+        "approved", action_id, item["name"], item["args"], item.get("expires"), actor, result
+    )
     log.info(f"[approved] {item['name']}({json.dumps(item['args'])}) -> {json.dumps(result)}")
-    _broadcast_approval({"type": "approval_result", "id": action_id,
-                         "status": "approved", "action": item["name"], "result": result})
+    _broadcast_approval(
+        {
+            "type": "approval_result",
+            "id": action_id,
+            "status": "approved",
+            "action": item["name"],
+            "result": result,
+        }
+    )
     return result
 
 
@@ -771,6 +864,7 @@ def _broadcast_approval(payload):
     """Push an approval event to SSE subscribers (best-effort, never crash)."""
     try:
         import events
+
         events.broadcast(payload)
     except Exception:
         pass
@@ -782,13 +876,38 @@ def deny_action(action_id, actor="unknown"):
         item = _pending_approvals.pop(action_id, None)
     if item is not None:
         _save_pending_approvals()
-        _append_approval("denied", action_id, item.get("name"),
-                         item.get("args"), item.get("expires"), actor,
-                         {"denied": True})
+        _append_approval(
+            "denied",
+            action_id,
+            item.get("name"),
+            item.get("args"),
+            item.get("expires"),
+            actor,
+            {"denied": True},
+        )
         log.info(f"[denied] {item.get('name')}({json.dumps(item.get('args'))}) [id={action_id}]")
-        _broadcast_approval({"type": "approval_result", "id": action_id,
-                             "status": "denied", "action": item.get("name"),
-                             "result": {"denied": True}})
+        _broadcast_approval(
+            {
+                "type": "approval_result",
+                "id": action_id,
+                "status": "denied",
+                "action": item.get("name"),
+                "result": {"denied": True},
+            }
+        )
+    else:
+        result = {"error": "Approval expired or not found."}
+        _save_pending_approvals()
+        _append_approval("deny_missing", action_id, None, None, None, actor, result)
+        _broadcast_approval(
+            {
+                "type": "approval_result",
+                "id": action_id,
+                "status": "denied_missing",
+                "action": None,
+                "result": result,
+            }
+        )
     return {"denied": True}
 
 
@@ -839,7 +958,10 @@ _CORE_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "duration": {"type": "string", "description": "Time from now as words, e.g. '2 minutes'"},
+                    "duration": {
+                        "type": "string",
+                        "description": "Time from now as words, e.g. '2 minutes'",
+                    },
                     "message": {"type": "string", "description": "What to remind about"},
                 },
                 "required": ["duration"],
@@ -885,7 +1007,9 @@ _CORE_TOOLS = [
             "description": "Save a note to a local zee_notes.txt file.",
             "parameters": {
                 "type": "object",
-                "properties": {"content": {"type": "string", "description": "The note text to save"}},
+                "properties": {
+                    "content": {"type": "string", "description": "The note text to save"}
+                },
                 "required": ["content"],
             },
         },
@@ -953,6 +1077,9 @@ def _chat(messages, tools, stream=False):
         kwargs["tools"] = tools
     if stream:
         kwargs["stream"] = True
+    else:
+        # Bound non-streaming requests so a hung Ollama cannot stall a worker.
+        kwargs["timeout"] = float(os.getenv("ZEE_OLLAMA_TIMEOUT", "60"))
     return ollama.chat(**kwargs)
 
 
@@ -1008,14 +1135,83 @@ def _quick_reply(text):
 # while answering an unrelated question).
 _GUARDS = {
     "get_time": ["time", "date", "day", "clock", "today", "calendar"],
-    "get_weather": ["weather", "temperature", "forecast", "rain", "snow", "hot", "cold", "degrees", "warm"],
-    "set_volume": ["volume", "louder", "quieter", "mute", "unmute", "sound", "turn it up", "turn it down", "turn up", "turn down", "lower", "raise"],
-    "adjust_volume": ["volume", "louder", "quieter", "mute", "unmute", "sound", "turn it up", "turn it down", "turn up", "turn down", "lower", "raise"],
-    "media_control": ["play", "pause", "stop", "music", "song", "video", "media", "resume", "skip", "next", "previous"],
-    "set_brightness": ["brightness", "brighter", "dimmer", "dim", "screen", "display", "turn it up", "turn it down"],
+    "get_weather": [
+        "weather",
+        "temperature",
+        "forecast",
+        "rain",
+        "snow",
+        "hot",
+        "cold",
+        "degrees",
+        "warm",
+    ],
+    "set_volume": [
+        "volume",
+        "louder",
+        "quieter",
+        "mute",
+        "unmute",
+        "sound",
+        "turn it up",
+        "turn it down",
+        "turn up",
+        "turn down",
+        "lower",
+        "raise",
+    ],
+    "adjust_volume": [
+        "volume",
+        "louder",
+        "quieter",
+        "mute",
+        "unmute",
+        "sound",
+        "turn it up",
+        "turn it down",
+        "turn up",
+        "turn down",
+        "lower",
+        "raise",
+    ],
+    "media_control": [
+        "play",
+        "pause",
+        "stop",
+        "music",
+        "song",
+        "video",
+        "media",
+        "resume",
+        "skip",
+        "next",
+        "previous",
+    ],
+    "set_brightness": [
+        "brightness",
+        "brighter",
+        "dimmer",
+        "dim",
+        "screen",
+        "display",
+        "turn it up",
+        "turn it down",
+    ],
     "type_text": ["type", "write", "keyboard"],
     "kill_process": ["kill", "close", "end task", "exit", "terminate", "quit"],
-    "system_action": ["shutdown", "shut down", "restart", "reboot", "sleep", "hibernate", "lock", "logoff", "sign out", "turn off", "power off"],
+    "system_action": [
+        "shutdown",
+        "shut down",
+        "restart",
+        "reboot",
+        "sleep",
+        "hibernate",
+        "lock",
+        "logoff",
+        "sign out",
+        "turn off",
+        "power off",
+    ],
 }
 
 
@@ -1031,9 +1227,11 @@ def _guard_blocked(name, user_text):
 def _guarded_run(name, args, user_text, actor="unknown"):
     """Run a tool, refusing when the user never asked for it."""
     if _guard_blocked(name, user_text):
-        return {"error": f"Do not use the '{name}' tool: the user did not ask for it. "
-                         "Never mention this tool again — answer the user's actual "
-                         "question directly instead."}
+        return {
+            "error": f"Do not use the '{name}' tool: the user did not ask for it. "
+            "Never mention this tool again — answer the user's actual "
+            "question directly instead."
+        }
     return run_tool(name, args, actor=actor)
 
 
@@ -1102,11 +1300,17 @@ def ask_ollama(text, actor="voice"):
                 if tool_rounds > 5:
                     raise RuntimeError("The model called tools too many times; giving up.")
                 messages.append({"role": "assistant", "content": response.message.content})
-                messages.append({
-                    "role": "tool",
-                    "content": json.dumps({"error": f"Unknown tool '{unknown}'. Only use the "
-                                               "tools listed; otherwise answer directly."}),
-                })
+                messages.append(
+                    {
+                        "role": "tool",
+                        "content": json.dumps(
+                            {
+                                "error": f"Unknown tool '{unknown}'. Only use the "
+                                "tools listed; otherwise answer directly."
+                            }
+                        ),
+                    }
+                )
                 continue
             if approval is None:
                 approval = maybe_request_approval(text, actor)
@@ -1203,11 +1407,17 @@ def _ask_stream(sa):
                 if tool_rounds > 5:
                     raise RuntimeError("The model called tools too many times; giving up.")
                 messages.append({"role": "assistant", "content": content})
-                messages.append({
-                    "role": "tool",
-                    "content": json.dumps({"error": f"Unknown tool '{unknown}'. Only use the "
-                                               "tools listed; otherwise answer directly."}),
-                })
+                messages.append(
+                    {
+                        "role": "tool",
+                        "content": json.dumps(
+                            {
+                                "error": f"Unknown tool '{unknown}'. Only use the "
+                                "tools listed; otherwise answer directly."
+                            }
+                        ),
+                    }
+                )
                 continue
             # Final answer — stream it.
             if sa.approval is None:
@@ -1223,14 +1433,21 @@ def _ask_stream(sa):
         if tool_rounds > 5:
             raise RuntimeError("The model called tools too many times; giving up.")
 
-        messages.append({
-            "role": "assistant",
-            "content": "".join(buffered) or None,
-            "tool_calls": [
-                {"function": {"name": tc.function.name, "arguments": tc.function.arguments or {}}}
-                for tc in tool_calls
-            ],
-        })
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "".join(buffered) or None,
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments or {},
+                        }
+                    }
+                    for tc in tool_calls
+                ],
+            }
+        )
         for call in tool_calls:
             name = call.function.name
             args = call.function.arguments or {}
@@ -1258,10 +1475,19 @@ _OPTIONAL_DEPS = {
 }
 
 
+def _probe_client(timeout=None):
+    """Ollama client with a short timeout so probes (/health, doctor) return
+    promptly instead of hanging on a stalled server."""
+    try:
+        return ollama.Client(timeout=float(timeout or os.getenv("ZEE_OLLAMA_TIMEOUT", "3")))
+    except TypeError:  # very old ollama bindings without Client(timeout=)
+        return ollama.Client()
+
+
 def check_ollama():
     """True if the Ollama server answers on the local API."""
     try:
-        ollama.list()
+        _probe_client().list(timeout=float(os.getenv("ZEE_OLLAMA_TIMEOUT", "3")))
         return True
     except Exception:
         return False
@@ -1270,7 +1496,7 @@ def check_ollama():
 def ollama_probe():
     """Health probe string: 'ok', 'unavailable', or the underlying error."""
     try:
-        ollama.list()
+        _probe_client().list()
         return "ok"
     except Exception as e:
         msg = str(e).strip()
@@ -1288,14 +1514,20 @@ def find_vosk_model():
     return None
 
 
-def doctor():
+def doctor(smoke=False):
     """Diagnose the environment: platform, dependencies, Ollama, model, audio.
+
+    ``smoke=True`` checks the *bundle* only: every dependency must import and
+    audio must initialize. It deliberately ignores whether the Ollama server
+    or a Vosk model dir are present — those are runtime-environment concerns
+    and not allowed to fail a CI/build smoke test.
 
     Never raises. Returns a dict report; use --doctor on the CLI for a
     human-readable summary with a nonzero exit code when critical pieces
     are missing.
     """
     import platform as _platform
+
     rep = {
         "platform": {
             "system": _platform.system(),
@@ -1321,47 +1553,87 @@ def doctor():
             deps["pycaw"] = f"UNAVAILABLE: {e}"
     rep["dependencies"] = deps
 
-    if check_ollama():
-        rep["ollama"] = "ok"
-        try:
-            ollama.show(OLLAMA_MODEL)
-            rep["model"] = "ok"
-        except Exception as e:
-            rep["model"] = f"ERROR: {e} (pull it with: ollama pull {OLLAMA_MODEL})"
+    if not smoke:
+        if check_ollama():
+            rep["ollama"] = "ok"
+            try:
+                _probe_client(timeout=5).show(OLLAMA_MODEL)
+                rep["model"] = "ok"
+            except Exception as e:
+                rep["model"] = f"ERROR: {e} (pull it with: ollama pull {OLLAMA_MODEL})"
+        else:
+            rep["ollama"] = "ERROR: Ollama server unreachable (start 'ollama serve')"
+            rep["model"] = "skipped (Ollama unreachable)"
     else:
-        rep["ollama"] = "ERROR: Ollama server unreachable (start 'ollama serve')"
-        rep["model"] = "skipped (Ollama unreachable)"
+        rep["ollama"] = "skipped in smoke mode (server not required)"
+        rep["model"] = "skipped in smoke mode (server not required)"
 
     if init_audio():
         rep["audio"] = "ok"
     else:
         rep["audio"] = "ERROR: audio device unavailable (TTS playback disabled)"
 
-    model_dir = find_vosk_model()
-    rep["vosk_model"] = ("ok" if model_dir
-                         else "missing (only needed for zee.py voice loop)")
+    if not smoke:
+        model_dir = find_vosk_model()
+        rep["vosk_model"] = "ok" if model_dir else "missing (only needed for zee.py voice loop)"
+    else:
+        try:
+            importlib.import_module("vosk")
+            rep["vosk_model"] = "ok (importable)"
+        except Exception as e:
+            rep["vosk_model"] = f"ERROR: vosk import failed: {e}"
+
     rep["automation_enabled"] = automation_enabled()
+
+    try:
+        import tokenstore
+
+        tok = tokenstore.read_token()
+        rep["token"] = "ok (persisted)" if tok else "none (dev mode)"
+    except Exception as e:
+        rep["token"] = f"UNAVAILABLE: {e}"
+
+    cert = os.path.join(apppaths.data_dir(), "cert.pem")
+    key = os.path.join(apppaths.data_dir(), "key.pem")
+    rep["https_cert"] = (
+        "ok"
+        if os.path.exists(cert) and os.path.exists(key)
+        else "missing (generated on first run with HTTPS)"
+    )
 
     critical_ok = (
         all(v == "ok" for k, v in deps.items() if k in _CRITICAL_DEPS)
         and rep.get("ollama") == "ok"
         and rep.get("model") == "ok"
     )
+    if smoke:
+        # Bundle integrity: every dep must import; audio must initialize.
+        critical_ok = (
+            all(v == "ok" for v in deps.values())
+            and rep["vosk_model"].startswith("ok")
+            and rep.get("audio") == "ok"
+        )
     rep["healthy"] = critical_ok
     return rep
 
 
 def doctor_summary(rep):
     """Format a doctor() report for console output."""
-    lines = [f"Platform: {rep['platform']['system']} ({rep['platform']['machine']}), "
-             f"Python {rep['platform']['python']}"]
+    lines = [
+        f"Platform: {rep['platform']['system']} ({rep['platform']['machine']}), "
+        f"Python {rep['platform']['python']}"
+    ]
     for label in sorted(rep["dependencies"]):
         lines.append(f"  dep  {label:15} {rep['dependencies'][label]}")
     lines.append(f"  ollama        {rep.get('ollama')}")
     lines.append(f"  model         {rep.get('model')}")
     lines.append(f"  audio         {rep.get('audio')}")
     lines.append(f"  vosk model    {rep.get('vosk_model')}")
-    lines.append(f"  automation    {'enabled' if rep.get('automation_enabled') else 'DISABLED (ZEE_ALLOW_AUTOMATION=1)'}")
+    lines.append(f"  token         {rep.get('token')}")
+    lines.append(f"  https cert    {rep.get('https_cert')}")
+    lines.append(
+        f"  automation    {'enabled' if rep.get('automation_enabled') else 'DISABLED (ZEE_ALLOW_AUTOMATION=1)'}"
+    )
     return lines
 
 

@@ -25,13 +25,17 @@ scripts\build_windows.bat
 
 REM ...or step by step:
 pyinstaller --noconfirm --clean zee.spec
-dist\Zee\Zee.exe doctor     ; smoke test: exits 0 when deps are healthy
+dist\Zee\Zee.exe doctor --smoke  ; bundle smoke test: deps import + audio
 iscc scripts\make_installer.iss
 ```
 
-`build_windows.bat` runs `Zee.exe doctor` on the freshly built bundle to
-catch a broken exe before packaging. Set `ZEE_ONEFILE=1` to also produce a
-single-file `dist\Zee.exe` alongside the onedir bundle.
+`build_windows.bat` runs `Zee.exe doctor --smoke` on the freshly built
+bundle to catch a broken exe before packaging. `--smoke` checks bundle
+integrity only (every dependency imports, audio initializes) and
+deliberately ignores runtime-environment concerns such as a running Ollama
+server, so the build passes on machines without Ollama. Run plain
+`Zee.exe doctor` for the full environment report. Set `ZEE_ONEFILE=1` to
+also produce a single-file `dist\Zee.exe` alongside the onedir bundle.
 
 Outputs:
 
@@ -93,12 +97,22 @@ manifest URL or a direct asset URL + `sha256`:
 ```
 
 The manifest is plain JSON: `{"version": "...", "url": "...", "sha256": "..."}`.
-The payload is downloaded to a temp dir, **SHA-256 verified**, then applied:
-a `*Setup*.exe` runs silently (Inno `/VERYSILENT /SUPPRESSMSGBOXES` — it
-upgrades in place over the same AppId), any other file is atomically swapped
-for `Zee.exe`. Because Windows can't overwrite a running image, the swap
-technically takes effect on the next start — to apply immediately from a
-detached process, stop the daemon first via the protected `POST /shutdown`:
+The payload is downloaded to a temp dir, **SHA-256 verified**, and — when the
+deployment policy demands it — **Authenticode-verified** before anything is
+applied:
+
+| Variable | Effect |
+| -------- | ------ |
+| `ZEE_REQUIRE_SIGNATURE=1` | the downloaded artifact must carry a **Valid** Authenticode signature |
+| `ZEE_SIGNER_THUMBPRINT=<hex>` | the signer's certificate thumbprint must match exactly |
+
+Then it is applied: a `*Setup*.exe` runs silently (Inno
+`/VERYSILENT /SUPPRESSMSGBOXES` — it upgrades in place over the same AppId,
+so an existing install is never uninstalled first), any other file is
+atomically swapped for `Zee.exe` (old exe renamed aside, new one moved in,
+stale file removed). Because Windows can't overwrite a running image, the
+swap technically takes effect on the next start — to apply immediately from
+a detached process, stop the daemon first via the protected `POST /shutdown`:
 
 ```bat
 python -m updater --manifest https://example.com/zee/latest.json --shutdown --restart

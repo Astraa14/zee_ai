@@ -11,9 +11,12 @@ Security notes:
   length capped, shell metacharacters rejected).
 - No os.system() anywhere: external commands run through subprocess with
   explicit argument lists, so nothing user-controlled can reach a shell.
+  URLs/apps launch via os.startfile (ShellExecute) — no cmd.exe involved.
 - App/file launching is restricted to trusted targets (known apps, Start
   Menu/Desktop shortcuts) or safe bare domain names.
 """
+
+import base64
 import logging
 import os
 import re
@@ -29,6 +32,19 @@ _DANGEROUS_CHARS_RE = re.compile(r"[\n\r;|`$&<>]")
 _SAFE_APP_NAME_RE = re.compile(r"[a-z0-9 ._\-]{1,40}")
 _SAFE_DOMAIN_RE = re.compile(r"[a-z0-9\-]+(\.[a-z0-9\-]+)+")
 _PATH_CHARS_RE = re.compile(r"[\\/:*?\"<>|]")
+
+
+def _ps_encoded(script, env=None):
+    """Run a fixed PowerShell script via -EncodedCommand, values in env vars.
+
+    The script text is a constant; every value travels inside the base64
+    payload or as an environment variable — never interpolated into a
+    command string. Quoting is impossible to break and no user input can
+    extend the script. Returns (returncode, stdout, stderr) via safe_run.
+    """
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    cmd = ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded]
+    return safe_run(cmd, timeout=20, env=env)
 
 
 def _clean_text(s, maxlen=MAX_ARG_LEN):
@@ -63,14 +79,20 @@ def automation_denied():
     return {"error": "Automation disabled; set ZEE_ALLOW_AUTOMATION=1 to enable"}
 
 
-def safe_run(cmd, timeout=10):
+def safe_run(cmd, timeout=10, env=None):
     """Run a command list — never through a shell, always with a timeout.
 
     Returns (returncode, stdout, stderr); on failure returncode is None and
-    stderr holds an error string.
+    stderr holds an error string. ``env`` (optional dict) is merged into the
+    child's environment without touching the parent's.
     """
     try:
-        res = subprocess.run(cmd, timeout=timeout, capture_output=True, text=True)
+        if env:
+            child_env = dict(os.environ)
+            child_env.update(env)
+        else:
+            child_env = None
+        res = subprocess.run(cmd, timeout=timeout, capture_output=True, text=True, env=child_env)
         return res.returncode, res.stdout, res.stderr
     except subprocess.TimeoutExpired:
         return None, None, f"timed out after {timeout}s"
@@ -84,10 +106,13 @@ def open_url(url):
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return f"Refusing to open non-http(s) URL: {url!r}"
     if os.name == "nt":
-        code, _, err = safe_run(["cmd", "/c", "start", "", url], timeout=10)
-    else:
-        opener = "open" if sys_platform_darwin() else "xdg-open"
-        code, _, err = safe_run([opener, url], timeout=10)
+        try:
+            os.startfile(url)
+            return None
+        except OSError as e:
+            return f"Could not open {url!r}: {e}"
+    opener = "open" if sys_platform_darwin() else "xdg-open"
+    code, _, err = safe_run([opener, url], timeout=10)
     return None if code in (0, 1) else (err or f"browser open failed (exit {code})")
 
 
@@ -147,10 +172,15 @@ _APP_INDEX = None
 def _build_app_index():
     """Scan Start Menu + Desktop shortcuts: {lowercase name: .lnk path}."""
     import glob
+
     index = {}
     dirs = [
-        os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs"),
-        os.path.join(os.environ.get("PROGRAMDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs"),
+        os.path.join(
+            os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs"
+        ),
+        os.path.join(
+            os.environ.get("PROGRAMDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs"
+        ),
         os.path.join(os.environ.get("USERPROFILE", ""), "Desktop"),
         os.path.join(os.environ.get("PUBLIC", ""), "Desktop"),
     ]
@@ -185,8 +215,20 @@ def _resolve_app(app):
 
 
 def _start(target):
-    """Launch a target (exe name, .lnk path or URL) detached, without a shell."""
-    safe_run(["cmd", "/c", "start", "", target], timeout=10)
+    """Launch a target (exe name, .lnk path or URL) detached, without a shell.
+
+    Windows uses ShellExecute via os.startfile — no cmd.exe is involved, so
+    nothing in the target (URLs with &, quotes, etc.) can reach a shell.
+    Returns None on success, else an error string.
+    """
+    if os.name == "nt":
+        try:
+            os.startfile(target)
+            return None
+        except OSError as e:
+            return f"Could not launch {target!r}: {e}"
+    code, _, err = safe_run([_posix_opener(), target], timeout=10)
+    return None if code in (0, 1) else (err or f"launch failed (exit {code})")
 
 
 def tool_open_app(app: str):
@@ -210,7 +252,9 @@ def tool_open_app(app: str):
     if target.startswith(("https://", "http://")):
         if not trusted:
             return {"error": f"Refusing to open an unknown URL: {app!r}"}
-        _start(target)
+        err = _start(target)
+        if err:
+            return {"error": err}
         return {"opened_website": target}
     if trusted:
         if not _automation_enabled():
@@ -221,11 +265,15 @@ def tool_open_app(app: str):
             except OSError as e:
                 return {"error": f"Could not open {target}: {e}"}
             return {"opened": target, "via": "installed app"}
-        _start(target)
+        err = _start(target)
+        if err:
+            return {"error": err}
         return {"opened": target, "via": "known app"}
     if _SAFE_DOMAIN_RE.fullmatch(target) or _SITE_SUFFIX_RE.search(target):
         url = f"https://{target}"
-        _start(url)
+        err = _start(url)
+        if err:
+            return {"error": err}
         return {"opened_website": url}
     return {"error": f"Unsupported application name: {app!r}"}
 
@@ -247,8 +295,7 @@ def tool_open_messenger_search(name: str = None):
     err = open_url(url)
     if err:
         return {"error": err}
-    return {"opened": url,
-            "note": "Please search manually; I opened messenger in your browser"}
+    return {"opened": url, "note": "Please search manually; I opened messenger in your browser"}
 
 
 # ---------------- FILES ----------------
@@ -263,6 +310,7 @@ def _posix_opener():
 
 def sys_platform_darwin():
     import sys
+
     return sys.platform == "darwin"
 
 
@@ -305,7 +353,9 @@ def tool_open_file(name: str):
                 break
         if scanned > 5000:
             break
-    return {"error": f"No file matching {name!r} found in Documents, Downloads, Desktop or Pictures."}
+    return {
+        "error": f"No file matching {name!r} found in Documents, Downloads, Desktop or Pictures."
+    }
 
 
 def tool_open_folder(path: str):
@@ -339,27 +389,53 @@ def tool_open_folder(path: str):
 # self-bot API, nothing against Discord's terms. Discord must be running.
 
 
-def _discord_sendkeys(keys):
-    """Activate the Discord window and send keystrokes via WScript.Shell."""
-    keys = sanitize_input(keys, 50)
+_DISCORD_SENDKEYS_SCRIPT = r"""
+$p = Get-Process Discord -ErrorAction SilentlyContinue |
+    Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+if (-not $p) { 'notfound' } else {
+    $ws = New-Object -ComObject WScript.Shell
+    $ok = $ws.AppActivate($p.Id)
+    Start-Sleep -Milliseconds 600
+    $ws.SendKeys($env:ZEE_KEYS)
+    'ok'
+}
+""".strip()
+
+
+def _discord_sendkeys(keys, strict=True):
+    """Activate the Discord window and send keystrokes via WScript.Shell.
+
+    ``strict`` applies the full sanitizer (user-supplied names); when False
+    (env-configured hotkeys like ``^`` for Ctrl+`) only control characters
+    are stripped so legitimate SendKeys syntax survives. The value travels
+    in the ZEE_KEYS env var — nothing is interpolated into a script.
+    """
+    keys = sanitize_input(keys, 50) if strict else _clean_text(keys, 20)
     if keys is None:
         return "error: invalid keys"
-    safe = keys.replace("'", "''")
-    script = (
-        "$p = Get-Process Discord -ErrorAction SilentlyContinue | "
-        "Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1; "
-        "if (-not $p) { 'notfound' } else { "
-        "$ws = New-Object -ComObject WScript.Shell; "
-        "$ok = $ws.AppActivate($p.Id); "
-        "Start-Sleep -Milliseconds 600; "
-        f"$ws.SendKeys('{safe}'); "
-        "'ok' }"
-    )
-    code, out, err = safe_run(["powershell", "-NoProfile", "-Command", script], timeout=20)
+    code, out, err = _ps_encoded(_DISCORD_SENDKEYS_SCRIPT, {"ZEE_KEYS": keys})
     if code is None:
         return f"error: {err}"
     log.debug(f"discord sendkeys {keys!r} -> {out.strip()!r}")
     return out.strip()
+
+
+_UIA_CLICK_SCRIPT = r"""
+try {
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+    $root = [System.Windows.Automation.AutomationElement]::RootElement
+    $cond = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty,
+        $env:ZEE_BUTTON)
+    $el = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+    if ($el) {
+        $p = $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+        $p.Invoke()
+        'clicked'
+    } else { 'notfound' }
+} catch { 'notfound' }
+""".strip()
 
 
 def _uia_click(button_name):
@@ -367,19 +443,7 @@ def _uia_click(button_name):
     button_name = sanitize_input(button_name, 100)
     if button_name is None:
         return False
-    safe = button_name.replace("'", "''")
-    script = (
-        "try { Add-Type -AssemblyName UIAutomationClient; "
-        "Add-Type -AssemblyName UIAutomationTypes; "
-        "$root = [System.Windows.Automation.AutomationElement]::RootElement; "
-        "$cond = New-Object System.Windows.Automation.PropertyCondition("
-        "[System.Windows.Automation.AutomationElement]::NameProperty, "
-        f"'{safe}'); "
-        "$el = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond); "
-        "if ($el) { $p = $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern); "
-        "$p.Invoke(); 'clicked' } else { 'notfound' } } catch { 'notfound' }"
-    )
-    code, out, err = safe_run(["powershell", "-NoProfile", "-Command", script], timeout=20)
+    code, out, err = _ps_encoded(_UIA_CLICK_SCRIPT, {"ZEE_BUTTON": button_name})
     if code is None:
         return False
     return out.strip() == "clicked"
@@ -390,6 +454,8 @@ def tool_discord_contact(name: str, search: bool = False):
 
     Requires ZEE_ALLOW_AUTOMATION=1 and the Discord desktop app running.
     """
+    if os.name != "nt":
+        return {"error": "Discord UI automation is only supported on Windows."}
     if not _automation_enabled():
         return automation_denied()
     name = sanitize_input(name, 80)
@@ -408,6 +474,8 @@ def tool_discord_contact(name: str, search: bool = False):
 
 def tool_discord_call(name: str):
     """Open a DM with a Discord user and start a voice call."""
+    if os.name != "nt":
+        return {"error": "Discord UI automation is only supported on Windows."}
     if not _automation_enabled():
         return automation_denied()
     res = tool_discord_contact(name, search=True)
@@ -417,16 +485,19 @@ def tool_discord_call(name: str):
     if _uia_click("Start Voice Call"):
         return {"calling": name, "via": "call button"}
     hotkey = os.getenv("ZEE_DISCORD_CALL_KEY", "^`")
-    _discord_sendkeys(hotkey)
-    return {"calling": name,
-            "note": "If the call did not start, add the 'Start/Stop Voice Call' "
-                    "keybind in Discord settings and set ZEE_DISCORD_CALL_KEY."}
+    _discord_sendkeys(hotkey, strict=False)
+    return {
+        "calling": name,
+        "note": "If the call did not start, add the 'Start/Stop Voice Call' "
+        "keybind in Discord settings and set ZEE_DISCORD_CALL_KEY.",
+    }
 
 
 # ---------------- PC CONTROL (volume / media / brightness / typing) ----------------
 def _press_vk(vk):
     """Press and release a virtual-key code using keybd_event."""
     import ctypes
+
     ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
     ctypes.windll.user32.keybd_event(vk, 0, 2, 0)
 
@@ -468,6 +539,7 @@ def _type_unicode(text):
 
 def _endpoint_volume():
     from pycaw.pycaw import AudioUtilities
+
     return AudioUtilities.GetSpeakers().EndpointVolume
 
 
@@ -527,7 +599,9 @@ def tool_media_control(action: str):
         return {"error": "Media control is only supported on Windows."}
     key = _MEDIA_KEYS.get(_clean_text(action, 20).lower())
     if key is None:
-        return {"error": f"Unknown media action: {action!r}. Use play/pause, next, previous or stop."}
+        return {
+            "error": f"Unknown media action: {action!r}. Use play/pause, next, previous or stop."
+        }
     _press_vk(key)
     return {"action": _clean_text(action, 20).lower()}
 
@@ -540,9 +614,11 @@ def tool_set_brightness(percent):
     except (TypeError, ValueError):
         return {"error": f"Invalid brightness: {percent!r}"}
     pct = max(0, min(100, pct))
-    cmd = ["powershell", "-NoProfile", "-Command",
-           f"(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1,{pct})"]
-    code, _, err = safe_run(cmd, timeout=20)
+    script = (
+        "(Get-WmiObject -Namespace root/WMI -Class "
+        "WmiMonitorBrightnessMethods).WmiSetBrightness(1, $env:ZEE_BRIGHTNESS)"
+    )
+    code, _, err = _ps_encoded(script, {"ZEE_BRIGHTNESS": str(pct)})
     if code is None:
         return {"error": f"set_brightness failed: {err}"}
     if code != 0:
@@ -555,6 +631,7 @@ def tool_screenshot():
         return automation_denied()
     from datetime import datetime
     from PIL import ImageGrab
+
     folder = os.path.join(os.getcwd(), "screenshots")
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, f"screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
@@ -582,9 +659,23 @@ def tool_type_text(text: str):
 
 # ---------------- PROCESSES / SYSTEM ----------------
 _PROTECTED_PROCESSES = {
-    "system", "registry", "wininit", "winlogon", "csrss", "smss", "services",
-    "lsass", "explorer", "svchost", "dwm", "taskhost", "taskhostw",
-    "runtimebroker", "shell", "sihost", "spoolsv",
+    "system",
+    "registry",
+    "wininit",
+    "winlogon",
+    "csrss",
+    "smss",
+    "services",
+    "lsass",
+    "explorer",
+    "svchost",
+    "dwm",
+    "taskhost",
+    "taskhostw",
+    "runtimebroker",
+    "shell",
+    "sihost",
+    "spoolsv",
 }
 
 
@@ -638,8 +729,10 @@ def tool_system_action(action: str):
     if code is None:
         # sleep/hibernate may never report back before the machine changes state
         if "timed out" in (err or ""):
-            return {"executed": action,
-                    "note": "command started; takes effect with the machine state change"}
+            return {
+                "executed": action,
+                "note": "command started; takes effect with the machine state change",
+            }
         return {"error": f"system_action failed: {err}"}
     return {"executed": action}
 
@@ -653,7 +746,12 @@ WIN_TOOLS = [
             "description": "Open a desktop application (e.g. notepad, calculator, browser, paint, terminal) or a website (e.g. youtube, google, gmail, facebook, netflix). For a Messenger/Facebook contact search say 'messenger search <name>'. Opening messenger or running a messenger search requires the ZEE_ALLOW_AUTOMATION opt-in.",
             "parameters": {
                 "type": "object",
-                "properties": {"app": {"type": "string", "description": "Name of the application to open, or \"messenger search <name>\""}},
+                "properties": {
+                    "app": {
+                        "type": "string",
+                        "description": 'Name of the application to open, or "messenger search <name>"',
+                    }
+                },
                 "required": ["app"],
             },
         },
@@ -665,7 +763,9 @@ WIN_TOOLS = [
             "description": "Find a file by name in Documents, Downloads, Desktop or Pictures and open it (e.g. resume.pdf).",
             "parameters": {
                 "type": "object",
-                "properties": {"name": {"type": "string", "description": "File name or part of it"}},
+                "properties": {
+                    "name": {"type": "string", "description": "File name or part of it"}
+                },
                 "required": ["name"],
             },
         },
@@ -679,7 +779,10 @@ WIN_TOOLS = [
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "The Discord username to find"},
-                    "search": {"type": "boolean", "description": "Use the quick switcher to search (default true)"},
+                    "search": {
+                        "type": "boolean",
+                        "description": "Use the quick switcher to search (default true)",
+                    },
                 },
                 "required": ["name"],
             },
@@ -692,7 +795,12 @@ WIN_TOOLS = [
             "description": "Search Messenger (Facebook) for a contact and open the result in the browser. Requires the ZEE_ALLOW_AUTOMATION opt-in.",
             "parameters": {
                 "type": "object",
-                "properties": {"name": {"type": "string", "description": "Contact name to search for, e.g. John Doe"}},
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Contact name to search for, e.g. John Doe",
+                    }
+                },
                 "required": ["name"],
             },
         },
@@ -704,7 +812,9 @@ WIN_TOOLS = [
             "description": "Find a Discord user and start a voice call with them. Requires the Discord desktop app to be running.",
             "parameters": {
                 "type": "object",
-                "properties": {"name": {"type": "string", "description": "The Discord username to call"}},
+                "properties": {
+                    "name": {"type": "string", "description": "The Discord username to call"}
+                },
                 "required": ["name"],
             },
         },
@@ -716,7 +826,9 @@ WIN_TOOLS = [
             "description": "Set the master volume to a percentage between 0 and 100.",
             "parameters": {
                 "type": "object",
-                "properties": {"percent": {"type": "number", "description": "Volume percentage 0-100"}},
+                "properties": {
+                    "percent": {"type": "number", "description": "Volume percentage 0-100"}
+                },
                 "required": ["percent"],
             },
         },
@@ -728,7 +840,9 @@ WIN_TOOLS = [
             "description": "Adjust volume up, down, mute or unmute.",
             "parameters": {
                 "type": "object",
-                "properties": {"direction": {"type": "string", "description": "up, down, mute or unmute"}},
+                "properties": {
+                    "direction": {"type": "string", "description": "up, down, mute or unmute"}
+                },
                 "required": ["direction"],
             },
         },
@@ -740,7 +854,12 @@ WIN_TOOLS = [
             "description": "Control the currently playing media: play/pause, next, previous or stop.",
             "parameters": {
                 "type": "object",
-                "properties": {"action": {"type": "string", "description": "play/pause, next, previous or stop"}},
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "play/pause, next, previous or stop",
+                    }
+                },
                 "required": ["action"],
             },
         },
@@ -752,7 +871,9 @@ WIN_TOOLS = [
             "description": "Set the screen brightness to a percentage between 0 and 100.",
             "parameters": {
                 "type": "object",
-                "properties": {"percent": {"type": "number", "description": "Brightness percentage 0-100"}},
+                "properties": {
+                    "percent": {"type": "number", "description": "Brightness percentage 0-100"}
+                },
                 "required": ["percent"],
             },
         },
@@ -784,7 +905,9 @@ WIN_TOOLS = [
             "description": "Open a folder or file path in File Explorer.",
             "parameters": {
                 "type": "object",
-                "properties": {"path": {"type": "string", "description": "The folder or file path to open"}},
+                "properties": {
+                    "path": {"type": "string", "description": "The folder or file path to open"}
+                },
                 "required": ["path"],
             },
         },
@@ -796,7 +919,12 @@ WIN_TOOLS = [
             "description": "Terminate a running application by its process name, e.g. notepad or chrome. This is dangerous and requires user approval.",
             "parameters": {
                 "type": "object",
-                "properties": {"name": {"type": "string", "description": "Process name without .exe, e.g. notepad"}},
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Process name without .exe, e.g. notepad",
+                    }
+                },
                 "required": ["name"],
             },
         },
@@ -808,7 +936,12 @@ WIN_TOOLS = [
             "description": "Perform a system action: shutdown, restart, sleep, hibernate, logoff or lock the computer. This is dangerous and requires user approval.",
             "parameters": {
                 "type": "object",
-                "properties": {"action": {"type": "string", "description": "shutdown, restart, sleep, hibernate, logoff or lock"}},
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "shutdown, restart, sleep, hibernate, logoff or lock",
+                    }
+                },
                 "required": ["action"],
             },
         },

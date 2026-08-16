@@ -6,6 +6,7 @@ Run standalone (``python zee_voice.py``) or as part of the daemon via
 When the wake word "zee" is heard the loop broadcasts a ``wake`` event on the
 SSE channel (``/events``) so the desktop GUI can raise itself.
 """
+
 import json
 import queue
 import re
@@ -23,8 +24,17 @@ is_speaking = False
 
 # Wake words: "zee" (and the truncated "zi" that Vosk often transcribes).
 _WAKE_RE = re.compile(r"\b(zee|zi|z)\b", re.IGNORECASE)
-_APPROVAL_WORDS = ("yes", "approve", "ok", "okay", "sure",
-                   "go ahead", "do it", "confirm", "allowed")
+_APPROVAL_WORDS = (
+    "yes",
+    "approve",
+    "ok",
+    "okay",
+    "sure",
+    "go ahead",
+    "do it",
+    "confirm",
+    "allowed",
+)
 
 
 def speak(text):
@@ -67,8 +77,7 @@ def handle_brain(text):
     try:
         answer = zee_core.ask_ollama(text, actor="voice")
     except Exception as e:
-        speak("I'm sorry, I am having trouble connecting "
-              "to my cognitive processor.")
+        speak("I'm sorry, I am having trouble connecting " "to my cognitive processor.")
         log.error(f"Brain error: {e}")
         return None
 
@@ -90,14 +99,17 @@ def broadcast_event(payload):
 
 def _broadcast_wake(text):
     import time
+
     now = time.time()
-    broadcast_event({
-        "type": "wake",
-        "phrase": text,
-        "text": text,
-        "ts": now,
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now)),
-    })
+    broadcast_event(
+        {
+            "type": "wake",
+            "phrase": text,
+            "text": text,
+            "ts": now,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now)),
+        }
+    )
 
 
 def audio_callback(indata, frames, time, status):
@@ -118,7 +130,17 @@ def _check_vosk_model():
             "https://alphacephei.com/vosk/models and unpack it as 'model' "
             "in the project folder. The web UI (zee_api.py) does NOT need it."
         )
-        sys.exit(1)
+        return False
+    try:
+        import vosk  # noqa: F401 — bundle sanity: module + native lib present
+    except Exception as e:
+        log.error(
+            f"Vosk import failed ({e}); reinstall with "
+            "'pip install vosk' (or use the bundled build). "
+            "The web UI does NOT need it."
+        )
+        return False
+    return True
 
 
 def _check_sound_device():
@@ -127,8 +149,10 @@ def _check_sound_device():
         sd.query_devices()
         return True
     except Exception as e:
-        log.error(f"No audio input device detected: {e}. "
-                  "The voice loop cannot listen without a microphone.")
+        log.error(
+            f"No audio input device detected: {e}. "
+            "The voice loop cannot listen without a microphone."
+        )
         return False
 
 
@@ -140,7 +164,8 @@ def run_voice_loop():
     """
     log.info("Starting ZEE voice loop...")
 
-    _check_vosk_model()
+    if not _check_vosk_model():
+        sys.exit(1)
     import vosk
 
     if not _check_sound_device():
@@ -149,8 +174,10 @@ def run_voice_loop():
     # Diagnostics: warn (don't stop) if Ollama or the model is missing —
     # the brain fails gracefully per request, but the user should know.
     if not zee_core.check_ollama():
-        log.error("Ollama server is not reachable. Start it with 'ollama serve' "
-                  "and pull the model first: ollama pull " + zee_core.OLLAMA_MODEL)
+        log.error(
+            "Ollama server is not reachable. Start it with 'ollama serve' "
+            "and pull the model first: ollama pull " + zee_core.OLLAMA_MODEL
+        )
 
     model = vosk.Model(zee_core.find_vosk_model())
     samplerate = 16000
@@ -161,8 +188,9 @@ def run_voice_loop():
     # Preload the model so the first question isn't slow.
     threading.Thread(target=zee_core.warmup_model, daemon=True).start()
 
-    with sd.RawInputStream(samplerate=samplerate, blocksize=8000, dtype='int16',
-                           channels=1, callback=audio_callback):
+    with sd.RawInputStream(
+        samplerate=samplerate, blocksize=8000, dtype="int16", channels=1, callback=audio_callback
+    ):
         rec = vosk.KaldiRecognizer(model, samplerate)
 
         speak("I am online and ready.")

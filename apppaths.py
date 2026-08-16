@@ -9,6 +9,7 @@
   this is the PyInstaller bundle root (``sys._MEIPASS``); from source it is
   the repo root.
 """
+
 import os
 import sys
 

@@ -16,6 +16,7 @@ Usage::
     def events_route():
         return events.stream_events_response()
 """
+
 import json
 import logging
 import queue
@@ -73,8 +74,7 @@ def stream_events_response():
     """Return a Flask ``Response`` (text/event-stream) for ``/events``."""
     from flask import Response, stream_with_context
 
-    return Response(stream_with_context(stream_events()),
-                    mimetype="text/event-stream")
+    return Response(stream_with_context(stream_events()), mimetype="text/event-stream")
 
 
 def subscriber_count():

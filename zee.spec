@@ -1,88 +1,47 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec for the ZEE desktop app (onedir).
-#
-#   pip install -r requirements-dev.txt
-#   pip install -r requirements-gui.txt      # PySide6, needed to bundle the GUI
-#   pyinstaller --noconfirm --clean zee.spec
-#
-# Output: dist/Zee/Zee.exe (onedir). The installer (scripts/make_installer.iss)
-# packs that folder. The Vosk model is NOT bundled (hundreds of MB) — after
-# install, drop it in %APPDATA%\Zee\model (see docs/packaging_windows.md).
-#
-# PySide6 + QtWebEngine ship their own PyInstaller hooks, which collect
-# QtWebEngineProcess.exe and its resources automatically. We also declare the
-# key QtWebEngine modules explicitly so a resource-less build can't drop them.
-from PyInstaller.utils.hooks import collect_submodules, collect_data_files
+from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_all
 
-block_cipher = None
+datas = [('templates', 'templates')]
+binaries = []
+hiddenimports = ['PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets']
+hiddenimports += collect_submodules('flask')
+tmp_ret = collect_all('vosk')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
-hiddenimports = (
-    collect_submodules("flask")
-    + ["zee_core", "zee_voice", "zee_api", "events", "win_control",
-       "apppaths", "tokenstore", "updater", "tools.install_autostart",
-       "gui.zee_gui"]
-    # QtWebEngine/WEB ENGINE
-    + [
-        "PySide6.QtWebEngineCore",
-        "PySide6.QtWebEngineWidgets",
-        "PySide6.QtWebEngine",
-        "PySide6.QtOpenGL",
-        "PySide6.QtQuick",
-        "PySide6.QtQml",
-    ]
-    + collect_submodules("PySide6.QtWebEngineCore")
-    + collect_submodules("PySide6.QtWebEngineWidgets")
-)
-
-datas = [
-    ("templates", "templates"),
-] + collect_data_files("PySide6.QtWebEngineCore")
 
 a = Analysis(
-    ["zee.py"],
+    ['zee.py'],
     pathex=[],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["PyQt5", "matplotlib", "tkinter"],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
+    excludes=[],
     noarchive=False,
+    optimize=0,
 )
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.datas,
     [],
-    exclude_binaries=True,
-    name="Zee",
+    name='Zee',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,
+    upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,  # daemon/GUI run without a console window
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    strip=False,
-    upx=False,
-    upx_exclude=[],
-    name="Zee",
 )

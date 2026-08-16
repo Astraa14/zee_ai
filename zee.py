@@ -11,6 +11,7 @@ The daemon reads ``~/.zee/zee.conf`` (simple ``KEY=VALUE`` lines) into the
 environment before importing the core, so GUI settings (automation toggle,
 token, voice) take effect on the next daemon start.
 """
+
 import argparse
 import os
 import subprocess
@@ -55,6 +56,7 @@ def _get_token():
     if token is not None:
         return token.strip() or None
     import tokenstore
+
     return tokenstore.read_token()
 
 
@@ -69,8 +71,7 @@ def _request(url, method="GET", data=None, timeout=5):
     token = _get_token()
     if token:
         headers["X-ZEE-TOKEN"] = token
-    return requests.request(method, url, data=data, headers=headers,
-                            timeout=timeout, verify=False)
+    return requests.request(method, url, data=data, headers=headers, timeout=timeout, verify=False)
 
 
 def _daemon_running():
@@ -100,8 +101,7 @@ def cmd_daemon():
     log.info("ZEE daemon starting (API + voice loop)...")
     # Audio must be initialized in the main thread before any speech threads.
     zee_core.init_audio()
-    threading.Thread(target=zee_voice.run_voice_loop, daemon=True,
-                     name="voice-loop").start()
+    threading.Thread(target=zee_voice.run_voice_loop, daemon=True, name="voice-loop").start()
     zee_api.run_server()
 
 
@@ -109,14 +109,18 @@ def _spawn_detached(args):
     """Launch a subprocess that survives this one closing (daemon)."""
     kwargs = {}
     if os.name == "nt":
-        kwargs["creationflags"] = (subprocess.CREATE_NEW_PROCESS_GROUP
-                                   | subprocess.DETACHED_PROCESS)
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
     else:
         kwargs["start_new_session"] = True
     subprocess.Popen(
-        args, cwd=ROOT,
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL, close_fds=True, **kwargs)
+        args,
+        cwd=ROOT,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        **kwargs,
+    )
 
 
 def cmd_start():
@@ -128,12 +132,12 @@ def cmd_start():
         if apppaths.frozen():
             _spawn_detached([sys.executable, "daemon"])
         else:
-            _spawn_detached([sys.executable, "-u",
-                             os.path.join(ROOT, "zee.py"), "daemon"])
+            _spawn_detached([sys.executable, "-u", os.path.join(ROOT, "zee.py"), "daemon"])
         if not _wait_for_daemon():
             log.error("Daemon did not become ready in time. Check zee.log.")
     try:
         from gui import zee_gui
+
         zee_gui.main()
     except ImportError as e:
         log.error(f"GUI unavailable ({e}); the daemon keeps running at {_base_url()}.")
@@ -142,6 +146,7 @@ def cmd_start():
 def cmd_gui():
     """Run only the desktop GUI (daemon must already be running)."""
     from gui import zee_gui
+
     zee_gui.main()
 
 
@@ -150,11 +155,9 @@ def cmd_stop():
     from zee_core import log
 
     try:
-        resp = _request(_base_url() + "/shutdown", method="POST",
-                        data=b"{}", timeout=5)
+        resp = _request(_base_url() + "/shutdown", method="POST", data=b"{}", timeout=5)
         if resp.status_code != 200:
-            log.error(f"Could not stop daemon (HTTP {resp.status_code}): "
-                      "check ZEE_TOKEN.")
+            log.error(f"Could not stop daemon (HTTP {resp.status_code}): " "check ZEE_TOKEN.")
             return 1
         body = resp.json()
         log.info(f"Daemon: {body.get('message', 'stopping')}")
@@ -167,21 +170,29 @@ def cmd_stop():
 def cmd_install_autostart(args):
     """Register ZEE to start at login for the current user."""
     from tools.install_autostart import install_autostart
+
     return install_autostart(with_gui=args.gui)
 
 
 def cmd_install_model(args):
     """Download the optional Vosk model into the data dir (not bundled)."""
     from tools.download_vosk_model import install
+
     install(model=args.model, url=args.url)
     return 0
 
 
-def cmd_doctor():
-    """Run the dependency/doctor report (used to smoke-test the bundle)."""
+def cmd_doctor(smoke=False):
+    """Run the dependency/doctor report (used to smoke-test the bundle).
+
+    ``--smoke`` checks bundle integrity only (deps import + audio), ignoring
+    runtime-environment concerns like a running Ollama server, so CI/build
+    hosts without Ollama still pass.
+    """
     from zee_core import doctor, doctor_summary, log, setup_logging
+
     setup_logging()
-    report = doctor()
+    report = doctor(smoke=smoke)
     for line in doctor_summary(report):
         log.info(f"[doctor] {line}")
     return 0 if report["healthy"] else 1
@@ -195,14 +206,20 @@ def main(argv=None):
     sub.add_parser("gui", help="run only the desktop GUI")
     sub.add_parser("start", help="start daemon in background, then open GUI")
     sub.add_parser("stop", help="stop the running daemon")
-    sub.add_parser("doctor", help="run the dependency/doctor report and exit")
+    doctor_p = sub.add_parser("doctor", help="run the dependency/doctor report and exit")
+    doctor_p.add_argument(
+        "--smoke",
+        action="store_true",
+        help="bundle smoke test: deps + audio only (no Ollama required)",
+    )
     autostart = sub.add_parser("install-autostart", help="register ZEE at login")
-    autostart.add_argument("--gui", action="store_true",
-                           help="also autostart the desktop GUI window")
-    model = sub.add_parser("install-model",
-                           help="download the optional Vosk voice model")
-    model.add_argument("--model", default="vosk-model-small-en-us-0.15",
-                       help="model name on alphacephei.com")
+    autostart.add_argument(
+        "--gui", action="store_true", help="also autostart the desktop GUI window"
+    )
+    model = sub.add_parser("install-model", help="download the optional Vosk voice model")
+    model.add_argument(
+        "--model", default="vosk-model-small-en-us-0.15", help="model name on alphacephei.com"
+    )
     model.add_argument("--url", help="direct .tar.gz URL (overrides --model)")
     args = parser.parse_args(argv)
 
@@ -215,7 +232,7 @@ def main(argv=None):
     elif args.command == "stop":
         sys.exit(cmd_stop())
     elif args.command == "doctor":
-        sys.exit(cmd_doctor())
+        sys.exit(cmd_doctor(smoke=args.smoke))
     elif args.command == "install-autostart":
         sys.exit(cmd_install_autostart(args) or 0)
     elif args.command == "install-model":

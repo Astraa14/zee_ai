@@ -34,6 +34,9 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
 
+      - name: Format check (black)
+        run: black --check .
+
       - name: Import / smoke tests
         env:
           ZEE_HTTPS: "0"
@@ -77,3 +80,32 @@ jobs:
           test -d dist/Zee
           test -f dist/Zee/zee || test -f dist/Zee/Zee
           echo "onedir bundle OK"
+
+  packaging-windows:
+    name: packaging (windows-latest bundle + smoke)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install build dependencies
+        run: python -m pip install -r requirements.txt -r requirements-gui.txt -r requirements-dev.txt
+
+      - name: Build onedir bundle (zee.spec)
+        run: python -m PyInstaller --noconfirm --clean zee.spec
+
+      - name: Smoke test the bundle
+        run: .\dist\Zee\Zee.exe doctor --smoke
+        env:
+          ZEE_TOKEN: "ci-test-token"
+
+      - name: Upload Windows bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: zee-windows-bundle
+          path: dist/Zee
+          if-no-files-found: error

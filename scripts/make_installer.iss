@@ -13,6 +13,7 @@
 AppId={{7F3E0B2A-9C4D-4E8B-9A2D-A1B2C3D4E5F6}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
+AppPublisher=ZEE Project
 DefaultDirName={autopf}\ZEE
 DefaultGroupName=ZEE
 UninstallDisplayIcon={app}\{#MyAppExeName}
@@ -24,6 +25,11 @@ WizardStyle=modern
 ; The data dir (logs, token, certs, memory) is %APPDATA%\Zee, so uninstalling
 ; the app does not delete the user's memory/approval history.
 UninstallDisplayName=ZEE Assistant
+; Upgrades (same AppId) install over the previous version without uninstalling.
+; Close any running Zee.exe first so its files are not locked.
+CloseApplications=yes
+RestartApplications=no
+AppMutex=ZeeAppMutex
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

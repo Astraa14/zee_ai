@@ -31,6 +31,7 @@ if "%ZEE_ONEFILE%"=="1" (
     python -m PyInstaller --noconfirm --clean --onefile --name Zee ^
         --hidden-import=PySide6.QtWebEngineCore ^
         --hidden-import=PySide6.QtWebEngineWidgets ^
+        --collect-all vosk ^
         --add-data "%BUILD_ROOT%\templates;templates" ^
         --collect-submodules flask zee.py
     if errorlevel 1 (
@@ -44,10 +45,10 @@ if "%ZEE_ONEFILE%"=="1" (
 mkdir "%BUILD_ROOT%\artifacts" 2>nul
 
 REM --- 3. Smoke test the bundle -----------------------------------------
-echo Running bundle smoke test (zee doctor)...
-"%BUILD_ROOT%\dist\Zee\Zee.exe" doctor
+echo Running bundle smoke test (Zee.exe doctor --smoke)...
+"%BUILD_ROOT%\dist\Zee\Zee.exe" doctor --smoke
 if errorlevel 1 (
-    echo [ERROR] Bundle smoke test failed (Zee.exe doctor exited nonzero).
+    echo [ERROR] Bundle smoke test failed (Zee.exe doctor --smoke exited nonzero).
     exit /b 1
 )
 echo [OK] Bundle smoke test passed.

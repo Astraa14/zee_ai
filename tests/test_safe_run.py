@@ -1,5 +1,6 @@
 """safe_run: subprocess wrapper — list arguments only, timeout enforced,
 no shell, errors returned as tuples instead of raised."""
+
 import subprocess
 
 import pytest
@@ -50,4 +51,5 @@ def test_safe_run_missing_binary_returns_error(monkeypatch):
 
 def sys_python():
     import sys
+
     return sys.executable

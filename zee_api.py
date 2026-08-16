@@ -57,17 +57,29 @@ _token = _get_token()
 
 
 def _loopback():
-    """True when the request originates from this machine (dev mode)."""
-    addr = (request.remote_addr or "").strip()
-    return addr in ("127.0.0.1", "::1", "localhost") or addr.startswith("127.")
+    """True when the request originates from this machine (dev mode).
+
+    Handles plain 127.*, ::1, "localhost" and IPv4-mapped IPv6
+    (::ffff:127.0.0.1) via ipaddress so dual-stack clients are not
+    misclassified as LAN.
+    """
+    addr = (request.remote_addr or "").strip().lower()
+    if addr in ("localhost", "::1"):
+        return True
+    try:
+        return ipaddress.ip_address(addr).is_loopback
+    except ValueError:
+        return False
 
 
 def _authorized():
     if not _token:
         # No token configured: dev mode only (localhost), with a warning.
         if _loopback():
-            log.warning("No auth token configured; allowing localhost request (dev mode). "
-                        "LAN access requires ZEE_TOKEN.")
+            log.warning(
+                "No auth token configured; allowing localhost request (dev mode). "
+                "LAN access requires ZEE_TOKEN."
+            )
             return True
         return False
     given = request.headers.get("X-ZEE-TOKEN", "")
@@ -79,25 +91,41 @@ def _authorized():
 
 @app.before_request
 def _require_auth():
-    if request.method == "POST" and request.path in ("/ask", "/approve", "/deny", "/shutdown", "/update"):
+    if request.method == "POST" and request.path in (
+        "/ask",
+        "/approve",
+        "/deny",
+        "/shutdown",
+        "/update",
+    ):
         if not _authorized():
             return jsonify({"error": "Unauthorized. Provide a valid access token."}), 401
 
 
 # ---------------- Rate limiting ----------------
 class _RateLimiter:
-    """Sliding-window rate limiter, one bucket per key (client IP)."""
+    """Sliding-window rate limiter, one bucket per key.
 
-    def __init__(self, limit, window_seconds):
+    Buckets are bounded (at most ``limit + window`` entries each) and stale
+    keys are pruned whenever more than ``max_keys`` accumulate, so memory
+    stays flat even under token/IP churn. Keys are per authenticated token
+    (hashed) with an IP fallback (see ``_client_key``).
+    """
+
+    def __init__(self, limit, window_seconds, max_keys=4096):
         self.limit = limit
         self.window = window_seconds
+        self.max_keys = max_keys
         self._hits = {}
         self._lock = threading.Lock()
+        self._last_prune = time.monotonic()
 
     def allow(self, key):
         now = time.monotonic()
         with self._lock:
-            bucket = [t for t in self._hits.get(key, []) if now - t < self.window]
+            if now - self._last_prune > self.window and len(self._hits) > self.limit:
+                self._prune_locked(now)
+            bucket = [t for t in self._hits.get(key, ()) if now - t < self.window]
             if len(bucket) >= self.limit:
                 self._hits[key] = bucket
                 return False
@@ -105,9 +133,22 @@ class _RateLimiter:
             self._hits[key] = bucket
             return True
 
+    def _prune_locked(self, now):
+        kept = {}
+        for k, v in self._hits.items():
+            recent = [t for t in v if now - t < self.window]
+            if recent:
+                kept[k] = recent
+        self._hits = kept
+        self._last_prune = now
+
 
 RATE_LIMIT_PER_MIN = int(os.getenv("ZEE_RATE_LIMIT", "10"))
 _ask_limiter = _RateLimiter(RATE_LIMIT_PER_MIN, 60)
+# Hard per-IP cap: even a client rotating many tokens cannot exceed it.
+_ip_limiter = _RateLimiter(max(RATE_LIMIT_PER_MIN * 4, 20), 60)
+# /approve and /deny share a modest bucket (they mutate system state).
+_approval_limiter = _RateLimiter(30, 60)
 
 
 def _client_key():
@@ -119,6 +160,13 @@ def _client_key():
     if _token and given:
         return "tok:" + hashlib.sha256(given.encode("utf-8")).hexdigest()
     return f"ip:{request.remote_addr or 'local'}"
+
+
+def _rate_limited():
+    """Check token-bucket + per-IP hard cap for the current request."""
+    if not _ask_limiter.allow(_client_key()):
+        return True
+    return not _ip_limiter.allow(f"ip:{request.remote_addr or 'local'}")
 
 
 def _clean_text(text):
@@ -166,11 +214,13 @@ def ensure_cert():
         .sign(key, hashes.SHA256())
     )
     with open(KEY_FILE, "wb") as f:
-        f.write(key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.TraditionalOpenSSL,
-            serialization.NoEncryption(),
-        ))
+        f.write(
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption(),
+            )
+        )
     with open(CERT_FILE, "wb") as f:
         f.write(cert.public_bytes(serialization.Encoding.PEM))
     log.info(f"Generated self-signed certificate for localhost and {_lan_ip()}")
@@ -185,10 +235,12 @@ def _stream_reply(text, actor="web"):
             yield json.dumps({"delta": delta}) + "\n"
         if stream.approval:
             zee_core.speak(stream.full_text + " Please approve or cancel on the screen.")
-            yield json.dumps({
-                "approval_id": stream.approval["id"],
-                "approval_message": stream.approval["message"],
-            }) + "\n"
+            yield json.dumps(
+                {
+                    "approval_id": stream.approval["id"],
+                    "approval_message": stream.approval["message"],
+                }
+            ) + "\n"
         else:
             zee_core.speak(stream.full_text)
     except Exception as e:
@@ -212,16 +264,20 @@ def health():
     """
     probe = zee_core.ollama_probe() or "unavailable"
     ok = probe == "ok"
-    return jsonify({
-        "ok": ok,
-        "ollama": probe,
-        "automation_enabled": zee_core.automation_enabled(),
-    }), (200 if ok else 503)
+    return jsonify(
+        {
+            "ok": ok,
+            "ollama": probe,
+            "automation_enabled": zee_core.automation_enabled(),
+        }
+    ), (200 if ok else 503)
 
 
 @app.route("/events")
 def events_route():
     """Server-Sent Events stream: wake events, approval requests, daemon state."""
+    if _token and not _authorized():
+        return jsonify({"error": "Unauthorized. Provide a valid access token."}), 401
     return events.stream_events_response()
 
 
@@ -263,6 +319,7 @@ def update():
 
     def _run():
         import updater
+
         try:
             result = updater.run_update(target, sha256=sha256 or None)
             log.info("Update finished: %s", result)
@@ -282,7 +339,7 @@ def _force_stop():
 
 @app.route("/ask", methods=["POST"])
 def ask():
-    if not _ask_limiter.allow(_client_key()):
+    if _rate_limited():
         log.warning(f"Rate limit hit for {_client_key()}")
         return jsonify({"error": "Too many requests. Please wait a moment."}), 429
 
@@ -317,6 +374,8 @@ def _valid_approval_id(data):
 
 @app.route("/approve", methods=["POST"])
 def approve():
+    if not _approval_limiter.allow(_client_key()):
+        return jsonify({"error": "Too many requests. Please wait a moment."}), 429
     data = request.get_json(silent=True) or {}
     action_id = _valid_approval_id(data)
     if not action_id:
@@ -331,6 +390,8 @@ def approve():
 
 @app.route("/deny", methods=["POST"])
 def deny():
+    if not _approval_limiter.allow(_client_key()):
+        return jsonify({"error": "Too many requests. Please wait a moment."}), 429
     data = request.get_json(silent=True) or {}
     action_id = _valid_approval_id(data)
     if not action_id:
@@ -366,11 +427,14 @@ def run_server():
     debug = os.getenv("FLASK_DEBUG", "0") == "1"
 
     if _token:
-        log.info(f"Web UI auth token: {_token}  (set ZEE_TOKEN to change, "
-                 "ZEE_TOKEN=none to disable)")
+        log.info(
+            f"Web UI auth token: {_token}  (set ZEE_TOKEN to change, " "ZEE_TOKEN=none to disable)"
+        )
     else:
-        log.warning("No auth token configured: requests allowed from localhost only "
-                    "(dev mode). LAN access requires ZEE_TOKEN.")
+        log.warning(
+            "No auth token configured: requests allowed from localhost only "
+            "(dev mode). LAN access requires ZEE_TOKEN."
+        )
 
     kwargs = {"host": "0.0.0.0", "port": 5000, "debug": debug}
     # HTTPS is on by default so the microphone works over the LAN.
@@ -379,8 +443,10 @@ def run_server():
         try:
             ensure_cert()
             kwargs["ssl_context"] = (CERT_FILE, KEY_FILE)
-            log.info(f"Serving at https://{_lan_ip()}:5000 "
-                     f"(allow the certificate once in your browser)")
+            log.info(
+                f"Serving at https://{_lan_ip()}:5000 "
+                f"(allow the certificate once in your browser)"
+            )
         except Exception as e:
             log.error(f"HTTPS unavailable ({e}); falling back to plain HTTP.")
     app.run(**kwargs)

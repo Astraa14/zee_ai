@@ -6,7 +6,9 @@ otherwise in the Windows Credential Locker / keyring, and always mirrored to
 ``.zee_token`` in the writable data dir so non-keyring callers (e.g. requests
 from the CLI) can find it.
 """
+
 import logging
+import os
 import secrets
 
 import apppaths
@@ -17,9 +19,19 @@ _ACCOUNT = "web-ui-token"
 TOKEN_FILE = apppaths.data_path(".zee_token")
 
 
+def _restrict(path):
+    """Lock a secrets file to the current user (POSIX); no-op on Windows."""
+    if os.name != "nt":
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+
+
 def _keyring():
     try:
         import keyring
+
         return keyring
     except ImportError:
         return None
@@ -56,6 +68,7 @@ def write_token(token=None):
         apppaths.ensure_data_dir()
         with open(TOKEN_FILE, "w", encoding="utf-8") as f:
             f.write(tok)
+        _restrict(TOKEN_FILE)
     except OSError as e:
         log.error(f"Could not persist auth token: {e}")
     return tok

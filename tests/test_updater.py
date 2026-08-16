@@ -1,5 +1,6 @@
 """Updater unit tests: sha256 helpers, download/verify, apply strategies,
 and the token-protected /update endpoint."""
+
 import hashlib
 import json
 import sys
@@ -30,14 +31,93 @@ def test_verify_sha256_ok_and_mismatch(payload_file):
         updater.verify_sha256(str(f), "0" * 64)
 
 
+def test_verify_authenticode_unsigned_raises(tmp_path):
+    """On Windows, an unsigned artifact is rejected under the signature policy."""
+    if sys.platform != "win32":
+        pytest.skip("Authenticode is Windows-only")
+    f = tmp_path / "unsigned.exe"
+    f.write_bytes(b"MZ" + b"\x00" * 64)
+    with pytest.raises(ValueError, match="Authenticode"):
+        updater.verify_authenticode(str(f))
+    # No policy configured → require_verified is a no-op.
+    updater.require_verified(str(f))
+
+
+def test_require_verified_enforced_when_configured(monkeypatch, tmp_path):
+    f = tmp_path / "release.exe"
+    f.write_bytes(b"data")
+    calls = []
+    monkeypatch.setattr(
+        updater, "verify_authenticode", lambda p, tp=None: calls.append((p, tp)) or "AB" * 20
+    )
+    monkeypatch.setenv("ZEE_REQUIRE_SIGNATURE", "1")
+    updater.require_verified(str(f))
+    assert calls == [(str(f), None)]
+    calls.clear()
+    monkeypatch.setenv("ZEE_SIGNER_THUMBPRINT", "ab" * 20)
+    updater.require_verified(str(f))
+    assert calls == [(str(f), "ab" * 20)]
+    calls.clear()
+    monkeypatch.delenv("ZEE_REQUIRE_SIGNATURE")
+    monkeypatch.delenv("ZEE_SIGNER_THUMBPRINT")
+    updater.require_verified(str(f))
+    assert calls == []
+
+
+def test_require_verified_rejects_bad_signature(monkeypatch, tmp_path):
+    f = tmp_path / "release.exe"
+    f.write_bytes(b"data")
+    monkeypatch.setenv("ZEE_REQUIRE_SIGNATURE", "1")
+    monkeypatch.setattr(
+        updater,
+        "verify_authenticode",
+        lambda p, tp=None: (_ for _ in ()).throw(
+            ValueError("Authenticode signature not valid: notsigned")
+        ),
+    )
+    with pytest.raises(ValueError, match="not valid"):
+        updater.require_verified(str(f))
+
+
+def test_run_update_honors_signature_policy(monkeypatch, tmp_path, payload_file):
+    """ZEE_REQUIRE_SIGNATURE=1 fails the update on an invalid signature."""
+    f, expected = payload_file
+
+    def fake_download(url, dest, timeout=120):
+        with open(dest, "wb") as out:
+            out.write(f.read_bytes())
+        return dest
+
+    monkeypatch.setattr(
+        updater,
+        "fetch_manifest",
+        lambda url: {
+            "version": "9.9.9",
+            "url": "https://x/Zee-Setup-9.9.9.exe",
+            "sha256": expected,
+        },
+    )
+    monkeypatch.setattr(updater, "download", fake_download)
+    monkeypatch.setattr(updater.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setenv("ZEE_REQUIRE_SIGNATURE", "1")
+    monkeypatch.setattr(
+        updater,
+        "verify_authenticode",
+        lambda p, tp=None: (_ for _ in ()).throw(
+            ValueError("Authenticode signature not valid: notsigned")
+        ),
+    )
+    with pytest.raises(ValueError, match="not valid"):
+        updater.run_update("https://x/latest.json", apply=True)
+
+
 def test_fetch_manifest_validates_fields(monkeypatch):
     class _Resp:
         def raise_for_status(self):
             pass
 
         def json(self):
-            return {"version": "1.0.1", "url": "https://x/Zee-Setup-1.0.1.exe",
-                    "sha256": "ab" * 32}
+            return {"version": "1.0.1", "url": "https://x/Zee-Setup-1.0.1.exe", "sha256": "ab" * 32}
 
     monkeypatch.setattr(updater.requests, "get", lambda *a, **k: _Resp())
     m = updater.fetch_manifest("https://x/latest.json")
@@ -48,8 +128,7 @@ def test_fetch_manifest_validates_fields(monkeypatch):
             pass
 
         def json(self):
-            return {"version": "1.0.1", "url": "file:///etc/passwd",
-                    "sha256": "ab" * 32}
+            return {"version": "1.0.1", "url": "file:///etc/passwd", "sha256": "ab" * 32}
 
     monkeypatch.setattr(updater.requests, "get", lambda *a, **k: _Bad())
     with pytest.raises(ValueError, match="must be http"):
@@ -72,8 +151,7 @@ def test_download_streams_to_dest(monkeypatch, tmp_path):
         def iter_content(self, chunk_size=None):
             return chunks
 
-    monkeypatch.setattr(updater.requests, "get",
-                        lambda *a, **k: _Resp())
+    monkeypatch.setattr(updater.requests, "get", lambda *a, **k: _Resp())
     dest = tmp_path / "out.bin"
     updater.download("https://x/f.bin", str(dest))
     assert dest.read_bytes() == b"a" * 256 + b"b" * 128
@@ -81,6 +159,7 @@ def test_download_streams_to_dest(monkeypatch, tmp_path):
 
 def test_atomic_replace_swaps_exe(monkeypatch, tmp_path):
     import sys
+
     fake_exe = tmp_path / "Zee.exe"
     fake_exe.write_bytes(b"old")
     monkeypatch.setattr(sys, "executable", str(fake_exe))
@@ -95,6 +174,7 @@ def test_atomic_replace_swaps_exe(monkeypatch, tmp_path):
 def test_atomic_replace_noop_from_source(monkeypatch, tmp_path):
     """Running under python.exe (no Zee exe) — nothing to swap."""
     import sys
+
     monkeypatch.setattr(sys, "executable", str(tmp_path / "python.exe"))
     new = tmp_path / "new.exe"
     new.write_bytes(b"new")
@@ -134,13 +214,18 @@ def test_run_update_flow(monkeypatch, tmp_path, payload_file):
             out.write(f.read_bytes())
         return dest
 
-    monkeypatch.setattr(updater, "fetch_manifest", lambda url: {
-        "version": "9.9.9", "url": "https://x/Zee-Setup-9.9.9.exe", "sha256": expected})
+    monkeypatch.setattr(
+        updater,
+        "fetch_manifest",
+        lambda url: {
+            "version": "9.9.9",
+            "url": "https://x/Zee-Setup-9.9.9.exe",
+            "sha256": expected,
+        },
+    )
     monkeypatch.setattr(updater, "download", fake_download)
-    monkeypatch.setattr(updater, "installer_apply",
-                        lambda p: (0, "installed", ""))
-    monkeypatch.setattr(updater.tempfile, "gettempdir",
-                        lambda: str(tmp_path))
+    monkeypatch.setattr(updater, "installer_apply", lambda p: (0, "installed", ""))
+    monkeypatch.setattr(updater.tempfile, "gettempdir", lambda: str(tmp_path))
 
     summary = updater.run_update("https://x/latest.json", apply=True)
     assert summary["version"] == "9.9.9"
@@ -158,18 +243,18 @@ def test_run_update_atomic_calls_shutdown_and_restart(monkeypatch, tmp_path, pay
             out.write(f.read_bytes())
         return dest
 
-    monkeypatch.setattr(updater, "fetch_manifest", lambda url: {
-        "version": "9.9.9", "url": "https://x/Zee.exe", "sha256": expected})
+    monkeypatch.setattr(
+        updater,
+        "fetch_manifest",
+        lambda url: {"version": "9.9.9", "url": "https://x/Zee.exe", "sha256": expected},
+    )
     monkeypatch.setattr(updater, "download", fake_download)
     monkeypatch.setattr(updater.tempfile, "gettempdir", lambda: str(tmp_path))
     stopped, restarted = [], []
-    monkeypatch.setattr(updater, "stop_daemon",
-                        lambda *a, **k: (stopped.append(True), True)[1])
-    monkeypatch.setattr(updater, "start_daemon",
-                        lambda exe=None: (restarted.append(exe), None)[1])
+    monkeypatch.setattr(updater, "stop_daemon", lambda *a, **k: (stopped.append(True), True)[1])
+    monkeypatch.setattr(updater, "start_daemon", lambda exe=None: (restarted.append(exe), None)[1])
 
-    summary = updater.run_update("https://x/latest.json", apply=True,
-                                 shutdown=True, restart=True)
+    summary = updater.run_update("https://x/latest.json", apply=True, shutdown=True, restart=True)
     assert summary["applied"] is True
     assert summary["replaced"] == str(tmp_path / "Zee.exe")
     assert stopped == [True]
@@ -208,19 +293,28 @@ def test_stop_daemon_returns_false_on_failure(monkeypatch):
 
 # ---------------- /update endpoint ----------------
 def test_update_requires_token(client):
-    resp = client.post("/update", data=json.dumps({"manifest": "https://x/l.json"}),
-                       content_type="application/json")
+    resp = client.post(
+        "/update",
+        data=json.dumps({"manifest": "https://x/l.json"}),
+        content_type="application/json",
+    )
     assert resp.status_code == 401
 
 
 def test_update_validates_urls(client):
-    resp = client.post("/update", data=json.dumps({"manifest": "file:///etc/passwd"}),
-                       content_type="application/json",
-                       headers={"Authorization": "Bearer ci-test-token"})
+    resp = client.post(
+        "/update",
+        data=json.dumps({"manifest": "file:///etc/passwd"}),
+        content_type="application/json",
+        headers={"Authorization": "Bearer ci-test-token"},
+    )
     assert resp.status_code == 400
-    resp = client.post("/update", data=json.dumps({}),
-                       content_type="application/json",
-                       headers={"Authorization": "Bearer ci-test-token"})
+    resp = client.post(
+        "/update",
+        data=json.dumps({}),
+        content_type="application/json",
+        headers={"Authorization": "Bearer ci-test-token"},
+    )
     assert resp.status_code == 400
 
 
@@ -231,11 +325,12 @@ def test_update_starts_background_job(client, monkeypatch):
         started.set()
 
     monkeypatch.setattr(updater, "run_update", fake_run)
-    resp = client.post("/update",
-                       data=json.dumps({"url": "https://x/Zee.exe",
-                                        "sha256": "ab" * 32}),
-                       content_type="application/json",
-                       headers={"X-ZEE-TOKEN": "ci-test-token"})
+    resp = client.post(
+        "/update",
+        data=json.dumps({"url": "https://x/Zee.exe", "sha256": "ab" * 32}),
+        content_type="application/json",
+        headers={"X-ZEE-TOKEN": "ci-test-token"},
+    )
     assert resp.status_code == 202
     assert resp.get_json()["ok"] is True
     assert started.wait(2), "background update never started"

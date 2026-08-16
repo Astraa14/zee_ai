@@ -32,6 +32,7 @@ class _FakeStream:
 def client():
     """Flask test client for API tests (auth + rate limiting)."""
     import zee_api
+
     zee_api.app.config["TESTING"] = True
     return zee_api.app.test_client()
 
@@ -52,5 +53,6 @@ def fake_brain(request, monkeypatch):
     monkeypatch.setattr(zee_core, "ollama_probe", lambda: "unavailable")
     monkeypatch.setattr(zee_core, "automation_enabled", lambda: False)
     import zee_api as _api
+
     monkeypatch.setattr(_api, "_token", "ci-test-token")
     yield

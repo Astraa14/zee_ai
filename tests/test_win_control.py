@@ -4,6 +4,7 @@ On non-Windows platforms we verify graceful degradation. On Windows we
 verify input validation and safe failure paths only — never actually
 launching apps, killing processes or driving Discord.
 """
+
 import os
 
 import pytest
@@ -41,6 +42,10 @@ def test_graceful_degradation_on_posix(posix):
     assert "error" in result
     assert "Windows" in wc.tool_system_action("shutdown")["error"]
     assert "Windows" in wc.tool_type_text("hi")["error"]
+    # Discord UI automation is COM-based: clear Windows-only error, even
+    # with automation enabled, and no powershell is ever spawned.
+    assert "Windows" in wc.tool_discord_contact("John Doe")["error"]
+    assert "Windows" in wc.tool_discord_call("John Doe")["error"]
 
 
 def test_system_action_rejects_unknown(monkeypatch):
@@ -51,11 +56,15 @@ def test_system_action_rejects_unknown(monkeypatch):
 
 def _fixed_index(monkeypatch):
     """Deterministic app index so tests don't depend on the machine's Start Menu."""
-    monkeypatch.setattr(wc, "_APP_INDEX", {
-        "notepad": r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Notepad.lnk",
-        "google chrome": r"C:\Program Files\Google\Chrome\chrome.exe.lnk",
-        "steam": r"C:\Program Files (x86)\Steam\steam.exe.lnk",
-    })
+    monkeypatch.setattr(
+        wc,
+        "_APP_INDEX",
+        {
+            "notepad": r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Notepad.lnk",
+            "google chrome": r"C:\Program Files\Google\Chrome\chrome.exe.lnk",
+            "steam": r"C:\Program Files (x86)\Steam\steam.exe.lnk",
+        },
+    )
 
 
 def test_open_app_validation(monkeypatch):
@@ -66,7 +75,13 @@ def test_open_app_validation(monkeypatch):
     monkeypatch.setattr(wc, "_start", lambda target: started.append(target))
 
     # shell metacharacters are rejected outright
-    for bad in ("notepad & calc", "notepad; rm -rf", "notepad | dir", "x$(whoami)", "notepad && calc"):
+    for bad in (
+        "notepad & calc",
+        "notepad; rm -rf",
+        "notepad | dir",
+        "x$(whoami)",
+        "notepad && calc",
+    ):
         result = wc.tool_open_app(bad)
         assert "error" in result, bad
     assert started == []
@@ -152,6 +167,7 @@ def test_messenger_and_discord_require_automation(monkeypatch):
     assert "Automation disabled" in wc.tool_open_app("messenger")["error"]
     assert "Automation disabled" in wc.tool_open_app("facebook messages")["error"]
     assert "Automation disabled" in wc.tool_open_app("messenger search for John Doe")["error"]
+
 
 def test_open_messenger_search_url(monkeypatch):
     """With automation on, a valid name produces a search URL."""

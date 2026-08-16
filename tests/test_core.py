@@ -2,6 +2,7 @@
 
 These never touch the network, the audio device or a real LLM.
 """
+
 import json
 import time
 
@@ -59,15 +60,18 @@ def test_quick_reply_non_greetings(msg):
 
 
 # ---------------- duration parser ----------------
-@pytest.mark.parametrize("duration,expected", [
-    ("2 minutes", 2.0),
-    ("in 10 minutes", 10.0),
-    ("1 hour 30 minutes", 90.0),
-    ("45 seconds", 0.75),
-    ("30 sec", 0.5),
-    ("5", 5.0),
-    ("2 minutes 30 seconds", 2.5),
-])
+@pytest.mark.parametrize(
+    "duration,expected",
+    [
+        ("2 minutes", 2.0),
+        ("in 10 minutes", 10.0),
+        ("1 hour 30 minutes", 90.0),
+        ("45 seconds", 0.75),
+        ("30 sec", 0.5),
+        ("5", 5.0),
+        ("2 minutes 30 seconds", 2.5),
+    ],
+)
 def test_duration_to_minutes(duration, expected):
     assert jc._duration_to_minutes(duration) == expected
 
@@ -89,10 +93,13 @@ def test_filter_args_drops_unknown_keys():
 
 
 def test_filter_args_unwraps_dict_wrapper():
-    cleaned = jc._filter_args(jc.tool_set_reminder, {
-        "duration": {"type": "string", "description": "time", "value": "10 minutes"},
-        "message": "hello",
-    })
+    cleaned = jc._filter_args(
+        jc.tool_set_reminder,
+        {
+            "duration": {"type": "string", "description": "time", "value": "10 minutes"},
+            "message": "hello",
+        },
+    )
     assert cleaned["duration"] == "10 minutes"
 
 
@@ -152,6 +159,7 @@ def test_run_tool_get_time():
 def test_run_tool_error_is_caught(monkeypatch):
     def boom(**kwargs):
         raise RuntimeError("kaboom")
+
     monkeypatch.setitem(jc._TOOL_FUNCS, "get_time", boom)
     result = jc.run_tool("get_time", {})
     assert "error" in result
@@ -198,8 +206,7 @@ def test_approval_broadcasts_result(monkeypatch):
     """approve/deny push an approval_result SSE event (best-effort)."""
     seen = []
     monkeypatch.setattr(jc, "_broadcast_approval", seen.append)
-    monkeypatch.setitem(jc._TOOL_FUNCS, "system_action",
-                        lambda **kw: {"executed": "lock"})
+    monkeypatch.setitem(jc._TOOL_FUNCS, "system_action", lambda **kw: {"executed": "lock"})
 
     pending = jc.request_approval("system_action", {"action": "lock"}, actor="web")
     jc.approve_action(pending["id"], actor="web")
@@ -224,12 +231,64 @@ def test_approval_audit_log(tmp_path):
     statuses = [ev["status"] for ev in events]
     assert "requested" in statuses and "denied" in statuses
     for ev in events:
-        assert set(ev) >= {"timestamp", "id", "action", "args", "expires", "status", "actor", "result"}
+        assert set(ev) >= {
+            "timestamp",
+            "id",
+            "action",
+            "args",
+            "expires",
+            "status",
+            "actor",
+            "result",
+        }
         assert ev["action"] == "kill_process"
         assert json.loads(ev["args"]) == {"name": "notepad"}
     assert events[-1]["actor"] == "user1"
     denied = [ev for ev in events if ev["status"] == "denied"][0]
     assert denied["result"] == {"denied": True}
+
+
+def test_approve_no_replay(monkeypatch):
+    """A pending approval can only be approved once (pop-then-execute)."""
+    calls = []
+    monkeypatch.setitem(
+        jc._TOOL_FUNCS, "system_action", lambda **kw: calls.append(kw) or {"executed": kw}
+    )
+
+    pending = jc.request_approval("system_action", {"action": "lock"})
+    jc.approve_action(pending["id"])
+    second = jc.approve_action(pending["id"])
+    assert "error" in second and "not found" in second["error"]
+    assert len(calls) == 1
+
+    denied = jc.request_approval("system_action", {"action": "lock"})
+    jc.deny_action(denied["id"])
+    assert "error" in jc.approve_action(denied["id"])
+
+
+def test_approve_tool_exception_is_audited(monkeypatch):
+    """A crashing tool is audited as approved_failed, never 'approved'."""
+    seen = []
+
+    def boom(**kw):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setitem(jc._TOOL_FUNCS, "system_action", boom)
+    monkeypatch.setattr(jc, "_append_approval", lambda *a, **k: seen.append(a[0]))
+    monkeypatch.setattr(jc, "_broadcast_approval", lambda *a, **k: None)
+
+    pending = jc.request_approval("system_action", {"action": "lock"})
+    result = jc.approve_action(pending["id"])
+    assert "error" in result and "failed" in result["error"]
+    assert "approved_failed" in seen
+
+
+def test_deny_missing_is_audited(monkeypatch):
+    """Denying an unknown/expired id is audited as deny_missing."""
+    seen = []
+    monkeypatch.setattr(jc, "_append_approval", lambda *a, **k: seen.append(a[0]))
+    jc.deny_action("nonexistent-id")
+    assert "deny_missing" in seen
 
 
 def test_maybe_request_approval_phrases():
@@ -244,10 +303,24 @@ def test_maybe_request_approval_phrases():
 def test_tool_get_weather_mocked(monkeypatch):
     def fake_fetch(url, timeout=10):
         if "/search?" in url:
-            return {"results": [{"name": "Manila", "country": "Philippines",
-                                 "latitude": 14.6, "longitude": 121.0}]}
-        return {"current": {"temperature_2m": 30.5, "relative_humidity_2m": 70,
-                            "wind_speed_10m": 12.3, "weather_code": 1}}
+            return {
+                "results": [
+                    {
+                        "name": "Manila",
+                        "country": "Philippines",
+                        "latitude": 14.6,
+                        "longitude": 121.0,
+                    }
+                ]
+            }
+        return {
+            "current": {
+                "temperature_2m": 30.5,
+                "relative_humidity_2m": 70,
+                "wind_speed_10m": 12.3,
+                "weather_code": 1,
+            }
+        }
 
     monkeypatch.setattr(jc, "_fetch_json", fake_fetch)
     result = jc.tool_get_weather("Manila")
@@ -276,10 +349,13 @@ def test_tool_get_weather_empty_city():
 
 def test_tool_web_search_mocked(monkeypatch):
     def fake_fetch(url, timeout=10):
-        return {"query": {"search": [
-            {"title": "Manila", "snippet": "<b>Manila</b> is the capital",
-             "pageid": 42},
-        ]}}
+        return {
+            "query": {
+                "search": [
+                    {"title": "Manila", "snippet": "<b>Manila</b> is the capital", "pageid": 42},
+                ]
+            }
+        }
 
     monkeypatch.setattr(jc, "_fetch_json", fake_fetch)
     result = jc.tool_web_search("manila")
@@ -288,7 +364,9 @@ def test_tool_web_search_mocked(monkeypatch):
 
 
 def test_tool_web_search_network_error(monkeypatch):
-    monkeypatch.setattr(jc, "_fetch_json", lambda url, timeout=10: (_ for _ in ()).throw(OSError("down")))
+    monkeypatch.setattr(
+        jc, "_fetch_json", lambda url, timeout=10: (_ for _ in ()).throw(OSError("down"))
+    )
     assert "error" in jc.tool_web_search("anything")
 
 

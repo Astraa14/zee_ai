@@ -14,6 +14,7 @@ Usage::
 After install, ``zee daemon`` / the GUI voice loop picks the model up on the
 next start (no rebuild or uninstall needed).
 """
+
 import argparse
 import os
 import sys
@@ -28,6 +29,7 @@ DEFAULT_MODEL = "vosk-model-small-en-us-0.15"
 def model_dir():
     """Return the data-dir model folder, creating it if needed."""
     import apppaths
+
     path = os.path.join(apppaths.data_dir(), "model")
     os.makedirs(path, exist_ok=True)
     return path
@@ -76,9 +78,13 @@ def install(model=DEFAULT_MODEL, url=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="zee-model-installer",
-        description="Download and unpack a Vosk speech model for ZEE (optional).")
-    parser.add_argument("--model", default=DEFAULT_MODEL,
-                        help=f"model folder name on alphacephei.com (default: {DEFAULT_MODEL})")
+        description="Download and unpack a Vosk speech model for ZEE (optional).",
+    )
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help=f"model folder name on alphacephei.com (default: {DEFAULT_MODEL})",
+    )
     parser.add_argument("--url", help="direct URL of a .tar.gz model (overrides --model)")
     args = parser.parse_args(argv)
 
