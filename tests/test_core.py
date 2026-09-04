@@ -266,7 +266,88 @@ def test_approve_no_replay(monkeypatch):
     assert "error" in jc.approve_action(denied["id"])
 
 
-def test_approve_tool_exception_is_audited(monkeypatch):
+def test_approval_atomic_pop_save(tmp_path, monkeypatch):
+    """Pop + save must happen inside the same lock to prevent races."""
+    monkeypatch.setattr(jc, "_APPROVAL_FILE", str(tmp_path / "approvals.json"))
+    monkeypatch.setattr(jc, "_APPROVALS_LOG", str(tmp_path / "approvals.log"))
+    monkeypatch.setattr(jc, "_MEMORY_FILE", str(tmp_path / "memory.json"))
+    jc._pending_approvals.clear()
+    jc._load_memory()
+
+    def fake_kill(name, **kwargs):
+        return {"killed": [name]}
+
+    monkeypatch.setitem(jc._TOOL_FUNCS, "kill_process", fake_kill)
+    jc._APPROVAL_TTL = 120
+
+    # Request, approve, then verify the approval is gone (popped, not expired)
+    pending = jc.request_approval("kill_process", {"name": "notepad"})
+    result = jc.approve_action(pending["id"])
+    assert result == {"killed": ["notepad"]}
+    # The approval should be gone from the in-memory map
+    assert pending["id"] not in jc._pending_approvals
+    # A new approval should be created (proving the old one was removed)
+    pending2 = jc.request_approval("kill_process", {"name": "calc"})
+    assert pending2["id"] != pending["id"]
+    result2 = jc.approve_action(pending2["id"])
+    assert result2 == {"killed": ["calc"]}
+
+
+def test_approval_single_use_and_persistence(tmp_path, monkeypatch):
+    """Approve once; re-approval should be 'error: not found'."""
+    monkeypatch.setattr(jc, "_APPROVAL_FILE", str(tmp_path / "approvals.json"))
+    monkeypatch.setattr(jc, "_APPROVALS_LOG", str(tmp_path / "approvals.log"))
+    monkeypatch.setattr(jc, "_MEMORY_FILE", str(tmp_path / "memory.json"))
+    jc._pending_approvals.clear()
+    jc._load_memory()
+
+    def fake_kill(name, **kwargs):
+        return {"killed": [name]}
+
+    monkeypatch.setitem(jc._TOOL_FUNCS, "kill_process", fake_kill)
+    jc._APPROVAL_TTL = 120
+
+    pending = jc.request_approval("kill_process", {"name": "notepad"})
+    # First approve
+    result = jc.approve_action(pending["id"])
+    assert result == {"killed": ["notepad"]}
+    # Replay should fail
+    second = jc.approve_action(pending["id"])
+    assert "error" in second
+    assert "not found" in second["error"]
+    # New approval should work
+    pending2 = jc.request_approval("kill_process", {"name": "calc"})
+    result2 = jc.approve_action(pending2["id"])
+    assert result2 == {"killed": ["calc"]}
+
+
+def test_approval_deny_and_reapprove(tmp_path, monkeypatch):
+    """Deny, then request + approve should work."""
+    monkeypatch.setattr(jc, "_APPROVAL_FILE", str(tmp_path / "approvals.json"))
+    monkeypatch.setattr(jc, "_APPROVALS_LOG", str(tmp_path / "approvals.log"))
+    monkeypatch.setattr(jc, "_MEMORY_FILE", str(tmp_path / "memory.json"))
+    jc._pending_approvals.clear()
+    jc._load_memory()
+
+    def fake_kill(name, **kwargs):
+        return {"killed": [name]}
+
+    monkeypatch.setitem(jc._TOOL_FUNCS, "kill_process", fake_kill)
+    jc._APPROVAL_TTL = 120
+
+    pending = jc.request_approval("kill_process", {"name": "notepad"})
+    # Deny
+    assert jc.deny_action(pending["id"]) == {"denied": True}
+    # Approve should now fail (expired / not found)
+    second = jc.approve_action(pending["id"])
+    assert "error" in second
+    # New approval should work
+    pending2 = jc.request_approval("kill_process", {"name": "calc"})
+    result2 = jc.approve_action(pending2["id"])
+    assert result2 == {"killed": ["calc"]}
+
+
+def test_approve_tool_exception_is_audited_as_failed(monkeypatch):
     """A crashing tool is audited as approved_failed, never 'approved'."""
     seen = []
 

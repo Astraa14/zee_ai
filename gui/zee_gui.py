@@ -106,9 +106,14 @@ class _SseWorker(QThread):
     bounds the in-flight queue (backpressure): when the GUI cannot keep up,
     intermediate frames are coalesced — only the newest event is delivered
     — so memory stays flat and wake events are never silently lost.
+
+    Signals:
+        frame: NDJSON data line from /events
+        auth_required: emitted when the SSE stream returns 401 (token expired/invalid)
     """
 
     frame = Signal(str)
+    auth_required = Signal()
     MAX_QUEUED = 16
     _MAX_BACKOFF = 30.0
 
@@ -126,6 +131,7 @@ class _SseWorker(QThread):
             try:
                 with _request(self._url, timeout=(5, 600)) as resp:
                     if resp.status_code == 401:
+                        self.auth_required.emit()
                         self._stopped.wait(backoff)
                         backoff = min(backoff * 2, self._MAX_BACKOFF)
                         continue
@@ -184,6 +190,14 @@ class _SettingsDialog(QDialog):
         self.automation.setChecked(self._cfg.get("ZEE_ALLOW_AUTOMATION") == "1")
         form.addRow(self.automation)
 
+        # Automation warning tooltip
+        if not self.automation.isChecked():
+            self.automation.setToolTip(
+                "⚠️ Desktop automation (opening apps, Discord calls, Messenger search) is disabled.\n"
+                "Enable it for convenience, but be careful: these actions can edit your system.\n"
+                "You will still get approval dialogs for dangerous actions like shutdown or kill."
+            )
+
         self.token = QLineEdit(self._cfg.get("ZEE_TOKEN", ""))
         self.token.setPlaceholderText("(auto-generated)")
         form.addRow("Access token (ZEE_TOKEN):", self.token)
@@ -241,6 +255,9 @@ class _SettingsDialog(QDialog):
                 os.chmod(CONFIG_FILE, 0o600)  # zee.conf may hold ZEE_TOKEN
             except OSError:
                 pass
+        # Also persist to OS keyring if available
+        import tokenstore
+        tokenstore.write_token(self._cfg["ZEE_TOKEN"])
         self.accept()
 
 
@@ -300,6 +317,120 @@ class _UpdateDialog(QDialog):
         self.accept()
 
 
+class _ApprovalToast(QDialog):
+    """Modal approval toast: shows the requested action with Approve/Cancel.
+
+    Shown automatically when an SSE ``approval`` event arrives. Posts
+    ``/approve`` or ``/deny`` to the daemon and dismisses.
+    """
+
+    def __init__(self, payload, parent=None):
+        super().__init__(parent)
+        self._payload = payload
+        self.setWindowTitle("ZEE needs your approval")
+        self.setMinimumWidth(380)
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+
+        form = QFormLayout(self)
+        action = payload.get("action", "?")
+        args = payload.get("args", {}) or {}
+        aid = payload.get("id", "?")
+        args_text = json.dumps(args, ensure_ascii=False)
+        form.addRow(QLabel(f"<b>{action}</b>({args_text})"))
+        form.addRow(QLabel(f"Approval id: <code>{aid}</code>"))
+        form.addRow(QLabel("Approve to let ZEE run this action. Otherwise click Cancel."))
+
+        buttons = QFormLayout()
+        approve_btn = QPushButton("Approve")
+        approve_btn.setStyleSheet("background-color: #b00020; color: white; font-weight: bold;")
+        approve_btn.clicked.connect(self._approve)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self._deny)
+        row = QFormLayout()
+        row.addRow(approve_btn, cancel_btn)
+        form.addRow(row)
+        self.setLayout(form)
+
+    def _post(self, endpoint):
+        aid = self._payload.get("id")
+        try:
+            resp = _request(
+                _base_url() + endpoint,
+                data=json.dumps({"approval_id": aid}),
+                timeout=5,
+            )
+            if resp.status_code not in (200, 202):
+                QMessageBox.warning(self, "ZEE", f"HTTP {resp.status_code}: {resp.text[:200]}")
+                return
+        except Exception as e:
+            QMessageBox.warning(self, "ZEE", f"Could not reach daemon: {e}")
+            return
+        self.accept()
+
+    def _approve(self):
+        self._post("/approve")
+
+    def _deny(self):
+        self._post("/deny")
+
+
+class _TokenPromptDialog(QDialog):
+    """Prompts the user to enter / update the ZEE access token.
+
+    Shown when the SSE stream returns 401. Saves the new token via
+    tokenstore + .zee.conf so the GUI's auth interceptor picks it up.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("ZEE auth required")
+        self.setMinimumWidth(380)
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        form = QFormLayout(self)
+        form.addRow(QLabel("ZEE's stream is rejecting requests. Enter the access token."))
+        self._entry = QLineEdit(_read_token() or "")
+        self._entry.setEchoMode(QLineEdit.EchoMode.Password)
+        self._entry.setPlaceholderText("paste the token from ~/.zee/zee.conf or zee_token")
+        form.addRow("Token:", self._entry)
+        save = QPushButton("Save")
+        save.clicked.connect(self._save)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        form.addRow(save, cancel)
+        self.setLayout(form)
+
+    def _save(self):
+        new = self._entry.text().strip()
+        if not new:
+            QMessageBox.warning(self, "ZEE", "Token cannot be empty.")
+            return
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        cfg = {}
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, encoding="utf-8") as f:
+                    for raw in f:
+                        line = raw.strip()
+                        if line and "=" in line and not line.startswith("#"):
+                            k, _, v = line.partition("=")
+                            cfg[k.strip()] = v.strip()
+            except OSError:
+                pass
+        cfg["ZEE_TOKEN"] = new
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            for k, v in cfg.items():
+                f.write(f"{k}={v}\n")
+        if os.name != "nt":
+            try:
+                os.chmod(CONFIG_FILE, 0o600)
+            except OSError:
+                pass
+        import tokenstore
+
+        tokenstore.write_token(new)
+        self.accept()
+
+
 class MainWindow(QMainWindow):
     """Embedded browser + system tray + SSE wake handling."""
 
@@ -324,6 +455,7 @@ class MainWindow(QMainWindow):
 
         self._sse = _SseWorker(_base_url() + "/events")
         self._sse.frame.connect(self._on_event)
+        self._sse.auth_required.connect(self._on_auth_required)
         self._sse.start()
 
         self._retry = QTimer(self)
@@ -424,6 +556,28 @@ class MainWindow(QMainWindow):
         if self._sse.take_pending_wake():
             # A wake/approval was coalesced under load — still raise the window.
             self.show_and_raise()
+        # Show approval toast for approval events
+        if payload.get("type") == "approval":
+            # We need the parent reference; since _on_event is a slot,
+            # we create the toast as a child of self.
+            toast = _ApprovalToast(payload, self)
+            toast.show()
+
+    def _on_auth_required(self):
+        """Called when SSE stream returns 401 — prompt the user for a valid token."""
+        dlg = _TokenPromptDialog(self)
+        if dlg.exec():
+            # Token was saved; restart the SSE worker to re-connect with new token
+            self._sse.stop()
+            self._sse.wait(3000)
+            # Force re-read of token from environment/config
+            self._token = _read_token()
+            # The _AuthInterceptor lambda will pick up the new value on next request;
+            # we also need to restart the SSE worker so it uses the fresh token.
+            self._sse = _SseWorker(_base_url() + "/events")
+            self._sse.frame.connect(self._on_event)
+            self._sse.auth_required.connect(self._on_auth_required)
+            self._sse.start()
 
 
 def main():

@@ -706,9 +706,15 @@ def _load_pending_approvals():
 
 
 def _save_pending_approvals():
+    """Persist pending approvals atomically (write temp + os.replace)."""
+    with _approval_lock:
+        _save_pending_approvals_locked()
+
+
+def _save_pending_approvals_locked():
+    """Same as _save_pending_approvals but must be called while holding _approval_lock."""
     try:
-        with _approval_lock:
-            data = json.dumps(_pending_approvals, ensure_ascii=False)
+        data = json.dumps(_pending_approvals, ensure_ascii=False)
         tmp = _APPROVAL_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(data)
@@ -788,8 +794,11 @@ def approve_action(action_id, actor="unknown"):
     """Execute a previously requested dangerous action. Returns the result dict."""
     with _approval_lock:
         item = _pending_approvals.pop(action_id, None)
+        if item is not None:
+            _save_pending_approvals_locked()
+        else:
+            _save_pending_approvals()
     if item is None:
-        _save_pending_approvals()
         result = {"error": "Approval expired or not found."}
         _append_approval("approve_missing", action_id, None, None, None, actor, result)
         return result
@@ -806,7 +815,6 @@ def approve_action(action_id, actor="unknown"):
             result,
         )
         return result
-    _save_pending_approvals()
     func = _TOOL_FUNCS.get(item["name"])
     if not func:
         result = {"error": f"Unknown tool: {item['name']}"}
@@ -1560,9 +1568,9 @@ def doctor(smoke=False):
                 _probe_client(timeout=5).show(OLLAMA_MODEL)
                 rep["model"] = "ok"
             except Exception as e:
-                rep["model"] = f"ERROR: {e} (pull it with: ollama pull {OLLAMA_MODEL})"
+                rep["model"] = f"CRITICAL: {e} (FIX: run 'ollama serve' and 'ollama pull {OLLAMA_MODEL}')"
         else:
-            rep["ollama"] = "ERROR: Ollama server unreachable (start 'ollama serve')"
+            rep["ollama"] = "CRITICAL: Ollama server unreachable (FIX: run 'ollama serve' and 'ollama pull {OLLAMA_MODEL}')"
             rep["model"] = "skipped (Ollama unreachable)"
     else:
         rep["ollama"] = "skipped in smoke mode (server not required)"

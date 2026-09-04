@@ -353,8 +353,14 @@ def ask():
     if len(text) > MAX_TEXT_LEN:
         return jsonify({"error": f"'text' is too long (max {MAX_TEXT_LEN} characters)."}), 400
 
+    # If user tries to open an app and automation is disabled, warn them.
     m = re.fullmatch(r"open\s+(?:the\s+|a\s+)?(.{1,40})", text)
     if m and not re.search(r"(where|what|how|why|when|about|with|help|door|window)", m.group(1)):
+        if not zee_core.automation_enabled():
+            return jsonify({
+                "error": "Desktop automation is disabled. Set ZEE_ALLOW_AUTOMATION=1 to enable app opening, Discord calls, and Messenger search. "
+                        "You will still need to approve each dangerous action."
+            }), 403
         result = zee_core.run_tool("open_app", {"app": m.group(1)}, actor="web")
         if result.get("opened") or result.get("opened_website"):
             reply = f"Opening {m.group(1).title()}."
@@ -419,6 +425,13 @@ def run_server():
         log.info(f"[doctor] {line}")
     if not report["healthy"]:
         log.error("Environment problems detected — see [doctor] lines above.")
+
+    # If Ollama is unreachable, surface a prominent early warning.
+    if report.get("ollama") != "ok":
+        log.error("OOPS: Ollama is unreachable. ZEE cannot answer without a brain.")
+        log.error("Fix: Start the Ollama server and pull the required model:")
+        log.error(f"  ollama serve")
+        log.error(f"  ollama pull {os.getenv('OLLAMA_MODEL', 'llama3.2:latest')}")
 
     # Audio must be initialized in the main thread before any speech threads.
     zee_core.init_audio()
